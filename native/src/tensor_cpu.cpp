@@ -211,8 +211,16 @@ void add_in_place(ImageTensor& destination, const ImageTensor& source) {
 }
 
 ImageTensor nearest_upsample_2x(const ImageTensor& input) {
+    return nearest_upsample(
+        input, input.height * 2, input.width * 2);
+}
+
+ImageTensor nearest_upsample(
+    const ImageTensor& input,
+    std::uint32_t output_height,
+    std::uint32_t output_width) {
     ImageTensor output{
-        input.channels, input.height * 2, input.width * 2, {}};
+        input.channels, output_height, output_width, {}};
     output.values.resize(static_cast<std::size_t>(elements(output)));
     parallel_for(
         input.channels,
@@ -226,9 +234,11 @@ ImageTensor nearest_upsample_2x(const ImageTensor& input) {
                             x] =
                             input.values[
                                 (std::uint64_t(channel) * input.height +
-                                 y / 2) *
+                                 std::uint64_t(y) * input.height /
+                                     output.height) *
                                     input.width +
-                                x / 2];
+                                std::uint64_t(x) * input.width /
+                                    output.width];
                     }
                 }
             }

@@ -21,12 +21,24 @@ std::string model_path(
 
 }  // namespace
 
-ModelBundle::ModelBundle(const std::string& root)
+ModelBundle::ModelBundle(
+    const std::string& root,
+    bool load_text_encoder)
     : unet_(std::make_unique<SafeTensors>(
           model_path(root, "unet", "diffusion_pytorch_model.safetensors"))),
       vae_(std::make_unique<SafeTensors>(
-          model_path(root, "vae", "diffusion_pytorch_model.safetensors"))),
-      text_encoder_(std::make_unique<SafeTensors>(
-          model_path(root, "text_encoder", "model.safetensors"))) {}
+          model_path(root, "vae", "diffusion_pytorch_model.safetensors"))) {
+    if (load_text_encoder) {
+        text_encoder_ = std::make_unique<SafeTensors>(
+            model_path(root, "text_encoder", "model.safetensors"));
+    }
+}
+
+const SafeTensors& ModelBundle::text_encoder() const {
+    if (!text_encoder_) {
+        throw std::runtime_error("Lotus text encoder was not loaded");
+    }
+    return *text_encoder_;
+}
 
 }  // namespace lotus_native

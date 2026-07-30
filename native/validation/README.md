@@ -19,11 +19,13 @@ The memory-mapped reader validates the Safetensors header, tensor names,
 dtypes, dimensions, byte counts, offsets, non-overlap, and full payload
 coverage before exposing any tensor.
 
-The production depth path always uses the empty prompt. A later coherent
-derived representation may replace the 1.36 GB CLIP component with its
-validated constant empty-prompt embedding, keyed by all three canonical
-hashes and converter version. The canonical snapshot remains shared with
-the Python backend.
+The production depth path always uses the empty prompt. The native converter
+therefore derives a 315,904-byte `LOTUSP01` cache containing only the validated
+77x1024 empty-prompt embedding. Its header binds the payload to the snapshot
+revision and all three canonical hashes. The DLL maps only the canonical UNet
+and VAE at runtime, avoiding the 1.36 GB CLIP mapping without creating a
+second model entry or weight download. The canonical snapshot remains shared
+with the Python backend.
 
 ## Current gate
 
@@ -46,5 +48,22 @@ The dependency-free CPU VAE now passes the Python CPU fixture:
 | Posterior log variance | `1.10318e-6` | `5.91278e-5` |
 | Decoder RGB | `5.85769e-7` | `3.45707e-6` |
 
-The single-step conditional UNet and end-to-end numerical comparison remain
-to be implemented before this backend can advertise inference capability.
+The single-step conditional UNet passes with relative L1 `7.24859e-6` and
+maximum absolute error `2.18749e-5`.
+
+## Full native DLL gate
+
+`lotus_native.dll` exposes ABI 1 lifecycle and inference calls. The exact
+validation entry accepts explicit initial and VAE-posterior noise, removing
+stochastic ambiguity while comparing the complete graph against Python CPU.
+The normal entry owns a stable seeded native RNG.
+
+| Gate | Result |
+|---|---:|
+| Full 64x64 relative depth L1 | `6.81436e-6` (`0.000681%`) |
+| Full maximum absolute depth error | `1.69128e-5` |
+| Non-multiple input | `65x73` passed |
+| C ABI smoke test | passed |
+
+The implementation is a correctness-first CPU oracle. It does not advertise
+Vulkan or GPU residency yet.
