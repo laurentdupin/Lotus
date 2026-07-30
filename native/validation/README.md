@@ -53,10 +53,18 @@ maximum absolute error `2.18749e-5`.
 
 ## Full native DLL gate
 
-`lotus_native.dll` exposes ABI 2 lifecycle and inference calls. The exact
+`lotus_native.dll` exposes ABI 3 lifecycle and inference calls. The exact
 validation entry accepts explicit initial and VAE-posterior noise, removing
 stochastic ambiguity while comparing the complete graph against Python CPU.
 The normal entry owns a stable seeded native RNG.
+
+ABI 3 adds the InferBridge image contract without changing the tensor ABI:
+`lotus_inferbridge_image_shape` reports the model's 768-pixel longest-edge
+working shape, while `lotus_infer_bgra8_f32[_with_noise]` retains the BGRA
+source's first three channels in BGR order, applies the Python harness's
+nearest-neighbour preprocessing and matching resize, and performs final
+per-image min/max normalization. The byte-image path is host-backed and does
+not claim external-resource or zero-copy GPU support.
 
 | Gate | Result |
 |---|---:|

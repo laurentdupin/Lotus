@@ -136,6 +136,91 @@ void output_depth(
     }
 }
 
+void inferbridge_shape(
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t& processing_width,
+    std::uint32_t& processing_height) {
+    if (width == 0 || height == 0) {
+        throw std::invalid_argument("Lotus image dimensions must be non-zero");
+    }
+    constexpr std::uint32_t processing_resolution = 768;
+    const double scale = std::min(
+        static_cast<double>(processing_resolution) / width,
+        static_cast<double>(processing_resolution) / height);
+    processing_width = std::max(
+        1u, static_cast<std::uint32_t>(static_cast<double>(width) * scale));
+    processing_height = std::max(
+        1u, static_cast<std::uint32_t>(static_cast<double>(height) * scale));
+}
+
+std::vector<float> preprocess_bgra(
+    const std::uint8_t* bgra,
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t row_stride,
+    std::uint32_t processing_width,
+    std::uint32_t processing_height) {
+    std::vector<float> output(
+        std::uint64_t(processing_width) * processing_height * 3);
+    for (std::uint32_t y = 0; y < processing_height; ++y) {
+        const std::uint32_t source_y = std::min(
+            height - 1,
+            static_cast<std::uint32_t>(
+                std::uint64_t(y) * height / processing_height));
+        const std::uint8_t* row =
+            bgra + std::uint64_t(source_y) * row_stride;
+        for (std::uint32_t x = 0; x < processing_width; ++x) {
+            const std::uint32_t source_x = std::min(
+                width - 1,
+                static_cast<std::uint32_t>(
+                    std::uint64_t(x) * width / processing_width));
+            for (std::uint32_t c = 0; c < 3; ++c) {
+                output[
+                    (std::uint64_t(y) * processing_width + x) * 3 + c] =
+                    static_cast<float>(row[std::uint64_t(source_x) * 4 + c]) /
+                    255.0f;
+            }
+        }
+    }
+    return output;
+}
+
+void resize_and_normalize(
+    const float* processing_depth,
+    std::uint32_t processing_width,
+    std::uint32_t processing_height,
+    std::uint32_t width,
+    std::uint32_t height,
+    float* depth) {
+    for (std::uint32_t y = 0; y < height; ++y) {
+        const std::uint32_t source_y = std::min(
+            processing_height - 1,
+            static_cast<std::uint32_t>(
+                std::uint64_t(y) * processing_height / height));
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::uint32_t source_x = std::min(
+                processing_width - 1,
+                static_cast<std::uint32_t>(
+                    std::uint64_t(x) * processing_width / width));
+            const float value = processing_depth[
+                std::uint64_t(source_y) * processing_width + source_x];
+            depth[std::uint64_t(y) * width + x] = value;
+        }
+    }
+    const std::uint64_t count = std::uint64_t(width) * height;
+    float minimum = depth[0];
+    float maximum = depth[0];
+    for (std::uint64_t i = 1; i < count; ++i) {
+        minimum = std::min(minimum, depth[i]);
+        maximum = std::max(maximum, depth[i]);
+    }
+    const float range = maximum - minimum;
+    for (std::uint64_t i = 0; i < count; ++i) {
+        depth[i] = range > 0.0f ? (depth[i] - minimum) / range : 0.0f;
+    }
+}
+
 }  // namespace
 
 extern "C" {
@@ -276,6 +361,99 @@ int lotus_infer_rgb_f32(
     }
     return lotus_infer_rgb_f32_with_noise(
         context, rgb, width, height,
+        initial.data(), posterior.data(), depth);
+}
+
+int lotus_inferbridge_image_shape(
+    std::uint32_t source_width,
+    std::uint32_t source_height,
+    std::uint32_t* processing_width,
+    std::uint32_t* processing_height) {
+    if (!processing_width || !processing_height) {
+        return fail(LOTUS_INVALID_ARGUMENT, "invalid Lotus shape argument");
+    }
+    try {
+        inferbridge_shape(
+            source_width, source_height,
+            *processing_width, *processing_height);
+        last_error.clear();
+        return LOTUS_OK;
+    } catch (const std::exception& error) {
+        return fail(LOTUS_INVALID_ARGUMENT, error);
+    }
+}
+
+int lotus_infer_bgra8_f32_with_noise(
+    lotus_context* context,
+    const std::uint8_t* bgra,
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t row_stride_bytes,
+    const float* initial_noise,
+    const float* posterior_noise,
+    float* depth) {
+    if (!context || !bgra || !initial_noise || !posterior_noise || !depth ||
+        width == 0 || height == 0 ||
+        row_stride_bytes < std::uint64_t(width) * 4) {
+        return fail(
+            LOTUS_INVALID_ARGUMENT, "invalid Lotus BGRA inference argument");
+    }
+    try {
+        std::uint32_t processing_width = 0;
+        std::uint32_t processing_height = 0;
+        inferbridge_shape(
+            width, height, processing_width, processing_height);
+        std::vector<float> rgb = preprocess_bgra(
+            bgra, width, height, row_stride_bytes,
+            processing_width, processing_height);
+        std::vector<float> processing_depth(
+            std::uint64_t(processing_width) * processing_height);
+        const int result = lotus_infer_rgb_f32_with_noise(
+            context, rgb.data(), processing_width, processing_height,
+            initial_noise, posterior_noise, processing_depth.data());
+        if (result != LOTUS_OK) {
+            return result;
+        }
+        resize_and_normalize(
+            processing_depth.data(), processing_width, processing_height,
+            width, height, depth);
+        last_error.clear();
+        return LOTUS_OK;
+    } catch (const std::exception& error) {
+        return fail(LOTUS_RUNTIME_ERROR, error);
+    }
+}
+
+int lotus_infer_bgra8_f32(
+    lotus_context* context,
+    const std::uint8_t* bgra,
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t row_stride_bytes,
+    std::uint64_t seed,
+    float* depth) {
+    std::uint32_t processing_width = 0;
+    std::uint32_t processing_height = 0;
+    const int shape_result = lotus_inferbridge_image_shape(
+        width, height, &processing_width, &processing_height);
+    if (shape_result != LOTUS_OK) {
+        return shape_result;
+    }
+    const std::uint64_t count =
+        std::uint64_t(4) * (processing_width / 8) *
+        (processing_height / 8);
+    std::mt19937_64 generator(seed);
+    std::normal_distribution<float> normal;
+    std::vector<float> initial(static_cast<std::size_t>(count));
+    std::vector<float> posterior(static_cast<std::size_t>(count));
+    for (float& value : initial) {
+        value = normal(generator);
+    }
+    for (float& value : posterior) {
+        value = normal(generator);
+    }
+    return lotus_infer_bgra8_f32_with_noise(
+        context, bgra, width, height, row_stride_bytes,
         initial.data(), posterior.data(), depth);
 }
 
