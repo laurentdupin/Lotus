@@ -28,6 +28,16 @@ the Python backend.
 ## Current gate
 
 The model probe validates all three canonical files and architecture anchor
-shapes. VAE encode/decode, the single-step conditional UNet, deterministic
-random inputs, and numerical comparison to the Python CPU pipeline remain
-to be implemented before this backend can advertise inference capability.
+shapes. `dump_reference.py` also produces a deterministic Python CPU fixture
+at 64x64 with explicit posterior and initial noise. Its component anchors are:
+
+| Tensor | Minimum | Maximum |
+|---|---:|---:|
+| VAE posterior mean | `-16.4733543` | `15.0739040` |
+| Scaled RGB latent | `-3.00059485` | `2.74570560` |
+| One-step UNet prediction | `-1.82667851` | `1.16818595` |
+| Decoded depth | `0.0287314560` | `0.547842979` |
+
+VAE encode/decode, the single-step conditional UNet, and numerical comparison
+to this fixture remain to be implemented before this backend can advertise
+inference capability.
