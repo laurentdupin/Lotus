@@ -85,3 +85,17 @@ not isolated comparative benchmarks.
 This is the FP32 correctness baseline. Mixed precision and external
 GPU-resource import/export are not advertised until separate accuracy and
 interop gates pass.
+
+## First performance pass
+
+VAE and UNet ResNet, attention, and transformer composites now use bounded
+Vulkan command batches. Buffer snapshots made inside a batch are recorded with
+explicit transfer/compute barriers. Batches remain block-sized so the runtime
+does not replace the correctness-first Windows watchdog bounds with one
+monolithic submission.
+
+The isolated RX 9070 64x64 median improved from `454.6 ms` to `191.9 ms`
+(`57.8%`) in matched seven-iteration runs. Five-call validation after the
+change passed on all three adapters with unchanged numerical results; observed
+medians were `246.5 ms` (RX 9070), `630.4 ms` (GTX 1080), and `214.3 ms`
+(RX 6700 XT).
