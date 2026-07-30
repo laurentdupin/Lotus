@@ -1,5 +1,6 @@
 __pycache__/
 output/
 native/out/
+/native/build-*/
 native/validation/*.bin
 native/validation/*.lotusp
