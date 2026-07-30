@@ -84,18 +84,26 @@ lotus_native::ImageTensor infer(
         rgb_latent.values[i] =
             (rgb_latent.values[i] +
              std::exp(0.5f * posterior.log_variance.values[i]) *
-                 posterior_noise[i]) *
+            posterior_noise[i]) *
             0.18215f;
     }
+    const std::uint32_t input_channels = static_cast<std::uint32_t>(
+        context.model->unet().tensor("conv_in.weight").dimensions[1]);
     lotus_native::ImageTensor sample{
-        8, latent_height, latent_width, {}};
-    sample.values.reserve(static_cast<std::size_t>(latent_elements * 2));
-    sample.values.insert(
-        sample.values.end(),
-        rgb_latent.values.begin(), rgb_latent.values.end());
-    sample.values.insert(
-        sample.values.end(),
-        initial_noise, initial_noise + latent_elements);
+        input_channels, latent_height, latent_width, {}};
+    if (input_channels == 8) {
+        sample.values.reserve(static_cast<std::size_t>(latent_elements * 2));
+        sample.values.insert(
+            sample.values.end(),
+            rgb_latent.values.begin(), rgb_latent.values.end());
+        sample.values.insert(
+            sample.values.end(),
+            initial_noise, initial_noise + latent_elements);
+    } else if (input_channels == 4) {
+        sample.values = std::move(rgb_latent.values);
+    } else {
+        throw std::runtime_error("unsupported Lotus UNet input channels");
+    }
     const std::vector<float> task = {
         std::sin(1.0f), 0.0f, std::cos(1.0f), 1.0f};
     lotus_native::ImageTensor prediction = lotus_native::unet_predict(
@@ -246,8 +254,11 @@ int lotus_create(
         context->model =
             std::make_unique<lotus_native::ModelBundle>(
                 snapshot_root, false);
-        context->prompt =
-            lotus_native::load_empty_prompt_cache(prompt_cache);
+        const std::uint32_t input_channels = static_cast<std::uint32_t>(
+            context->model->unet().tensor(
+                "conv_in.weight").dimensions[1]);
+        context->prompt = lotus_native::load_empty_prompt_cache(
+            prompt_cache, input_channels);
         *output = context.release();
         last_error.clear();
         return LOTUS_OK;
@@ -274,8 +285,11 @@ int lotus_create_vulkan(
         context->model =
             std::make_unique<lotus_native::ModelBundle>(
                 snapshot_root, false);
-        context->prompt =
-            lotus_native::load_empty_prompt_cache(prompt_cache);
+        const std::uint32_t input_channels = static_cast<std::uint32_t>(
+            context->model->unet().tensor(
+                "conv_in.weight").dimensions[1]);
+        context->prompt = lotus_native::load_empty_prompt_cache(
+            prompt_cache, input_channels);
         context->vulkan =
             std::make_unique<lotus_native::VulkanContext>(device_index);
         context->gpu_unet = std::make_unique<lotus_native::GpuModel>(

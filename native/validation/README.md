@@ -107,3 +107,29 @@ The isolated RX 9070 64x64 median improved from `454.6 ms` to `191.9 ms`
 change passed on all three adapters with unchanged numerical results; observed
 medians were `246.5 ms` (RX 9070), `630.4 ms` (GTX 1080), and `214.3 ms`
 (RX 6700 XT).
+
+## Discriminative checkpoint
+
+The same ABI now detects and executes InferBridge's selectable regression
+checkpoint `jingheya/lotus-depth-d-v1-0` at revision
+`9b858ffdbec93117d50de899e8bccf64345d8f3b`. Its canonical UNet SHA-256 is
+`66f32e128f0f85a6f2d72893f56c663f8abde5a76678180b0eb51b1f3ed44899`;
+the VAE and text encoder are byte-identical to the generative checkpoint.
+The regression path samples the VAE posterior, feeds its four-channel RGB
+latent directly to the discriminative UNet, and decodes that prediction. It
+does not manufacture or consume a generative target latent.
+
+The regression prompt sidecar reuses the identical text-encoder result but
+has distinct content-bound revision and UNet metadata. The loader rejects a
+generative sidecar for a regression model and vice versa.
+
+| Executor | Full 64x64 relative L1 | Maximum absolute |
+|---|---:|---:|
+| CPU | `3.72883e-6` | `2.51532e-5` |
+| Radeon RX 9070 | `4.17826e-6` | `1.32918e-5` |
+| GeForce GTX 1080 | `4.25895e-6` | `9.23872e-6` |
+| Radeon RX 6700 XT | `4.11891e-6` | `1.37687e-5` |
+
+The 768x64 BGRA image-contract equivalence canary also passed on all three
+GPUs with exactly zero maximum and mean absolute difference versus the
+validated tensor path plus final normalization.

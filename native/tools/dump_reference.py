@@ -3,10 +3,60 @@
 from __future__ import annotations
 
 import argparse
+import enum
+import importlib.machinery
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
 import torch
+
+
+# The installed TorchVision wheel may lack its optional compiled operators.
+# Diffusers only needs these symbols for unrelated image/video helpers while
+# this fixture generator works directly with tensors.
+_torchvision_modules = {
+    name: types.ModuleType(name)
+    for name in (
+        "torchvision",
+        "torchvision.transforms",
+        "torchvision.io",
+        "torchvision.transforms.v2",
+        "torchvision.transforms.v2.functional",
+    )
+}
+for _name, _module in _torchvision_modules.items():
+    _module.__spec__ = importlib.machinery.ModuleSpec(_name, loader=None)
+    sys.modules[_name] = _module
+
+
+class _InterpolationMode(enum.Enum):
+    NEAREST = 0
+    NEAREST_EXACT = 1
+    BILINEAR = 2
+    BICUBIC = 3
+    BOX = 4
+    HAMMING = 5
+    LANCZOS = 6
+
+
+_torchvision_modules["torchvision.transforms"].InterpolationMode = (
+    _InterpolationMode
+)
+_torchvision_modules["torchvision"].transforms = _torchvision_modules[
+    "torchvision.transforms"
+]
+_torchvision_modules["torchvision"].io = _torchvision_modules[
+    "torchvision.io"
+]
+_torchvision_modules["torchvision.transforms"].v2 = _torchvision_modules[
+    "torchvision.transforms.v2"
+]
+_torchvision_modules["torchvision.transforms.v2"].functional = (
+    _torchvision_modules["torchvision.transforms.v2.functional"]
+)
+
 from diffusers import AutoencoderKL, UNet2DConditionModel
 from transformers import CLIPTextModel, CLIPTokenizer
 
@@ -79,7 +129,14 @@ def main() -> None:
     unet = UNet2DConditionModel.from_pretrained(
         root, subfolder="unet", local_files_only=True
     ).eval()
-    unet_input = torch.cat((rgb_latent, initial_latent), dim=1)
+    if unet.config.in_channels == 8:
+        unet_input = torch.cat((rgb_latent, initial_latent), dim=1)
+    elif unet.config.in_channels == 4:
+        unet_input = rgb_latent
+    else:
+        raise RuntimeError(
+            f"unsupported Lotus UNet input channels: {unet.config.in_channels}"
+        )
     prediction = unet(
         unet_input,
         torch.tensor(999),

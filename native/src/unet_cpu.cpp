@@ -128,7 +128,11 @@ ImageTensor unet_predict(
     std::uint32_t timestep,
     const TokenTensor& prompt,
     const std::vector<float>& class_labels) {
-    if (sample.channels != 8 || class_labels.size() != 4 ||
+    const TensorView& input_kernel = model.tensor("conv_in.weight");
+    const std::uint32_t expected_channels =
+        static_cast<std::uint32_t>(input_kernel.dimensions[1]);
+    if ((expected_channels != 4 && expected_channels != 8) ||
+        sample.channels != expected_channels || class_labels.size() != 4 ||
         prompt.dimensions != 1024) {
         throw std::invalid_argument("invalid Lotus UNet input");
     }

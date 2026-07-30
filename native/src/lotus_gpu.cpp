@@ -73,17 +73,27 @@ public:
         operators_.posterior_sample(
             rgb_latent.buffer, posterior.buffer,
             posterior_noise_buffer, latent_count);
-        VulkanBuffer initial_buffer =
-            context_.create_device_buffer(latent_count * sizeof(float));
-        context_.upload(
-            initial_buffer, initial_noise, latent_count * sizeof(float));
-        GpuImage sample{
-            context_.create_device_buffer(
-                std::uint64_t(latent_count) * 2 * sizeof(float)),
-            8, latent_height, latent_width};
-        operators_.concatenate(
-            sample.buffer, rgb_latent.buffer, initial_buffer,
-            latent_count, latent_count);
+        const std::uint32_t input_channels = static_cast<std::uint32_t>(
+            tensor(unet_, "conv_in.weight").dimensions[1]);
+        GpuImage sample;
+        if (input_channels == 8) {
+            VulkanBuffer initial_buffer =
+                context_.create_device_buffer(latent_count * sizeof(float));
+            context_.upload(
+                initial_buffer, initial_noise, latent_count * sizeof(float));
+            sample = {
+                context_.create_device_buffer(
+                    std::uint64_t(latent_count) * 2 * sizeof(float)),
+                8, latent_height, latent_width};
+            operators_.concatenate(
+                sample.buffer, rgb_latent.buffer, initial_buffer,
+                latent_count, latent_count);
+        } else if (input_channels == 4) {
+            sample = std::move(rgb_latent);
+        } else {
+            throw std::runtime_error(
+                "unsupported Lotus UNet input channels");
+        }
         GpuImage prediction = unet_predict(std::move(sample));
         operators_.scale_values(
             prediction.buffer,
@@ -711,13 +721,15 @@ GpuImage lotus_unet_gpu(
     const TokenTensor& prompt, const float* input,
     std::uint32_t width, std::uint32_t height) {
     Graph graph(context, unet, unet, operators, prompt);
+    const std::uint32_t input_channels = static_cast<std::uint32_t>(
+        unet.tensor("conv_in.weight").dimensions[1]);
     GpuImage sample{
         context.create_device_buffer(
-            std::uint64_t(8) * width * height * sizeof(float)),
-        8, height, width};
+            std::uint64_t(input_channels) * width * height * sizeof(float)),
+        input_channels, height, width};
     context.upload(
         sample.buffer, input,
-        std::uint64_t(8) * width * height * sizeof(float));
+        std::uint64_t(input_channels) * width * height * sizeof(float));
     return graph.test_predict(std::move(sample));
 }
 

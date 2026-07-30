@@ -284,10 +284,15 @@ int main(int argc, char** argv) {
         {
             auto rgb_latent = load(fixture / "rgb_latent.bin", 4 * 8 * 8);
             auto initial = load(fixture / "initial_latent.bin", 4 * 8 * 8);
-            rgb_latent.insert(
-                rgb_latent.end(), initial.begin(), initial.end());
-            auto prompt =
-                lotus_native::load_empty_prompt_cache(argv[2]);
+            const std::uint32_t input_channels =
+                static_cast<std::uint32_t>(
+                    unet.tensor("conv_in.weight").dimensions[1]);
+            if (input_channels == 8) {
+                rgb_latent.insert(
+                    rgb_latent.end(), initial.begin(), initial.end());
+            }
+            auto prompt = lotus_native::load_empty_prompt_cache(
+                argv[2], input_channels);
             auto output = lotus_native::lotus_unet_gpu(
                 context, gpu_unet, operators, prompt,
                 rgb_latent.data(), 8, 8);
