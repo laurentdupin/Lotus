@@ -133,3 +133,37 @@ generative sidecar for a regression model and vice versa.
 The 768x64 BGRA image-contract equivalence canary also passed on all three
 GPUs with exactly zero maximum and mean absolute difference versus the
 validated tensor path plus final normalization.
+
+## Embedded InferBridge harness
+
+The model DLL exports `ibrh_get_api` for InferBridge harness ABI 1.0. It
+accepts one host-memory BGRA8 image and returns one leased host-memory,
+source-size normalized FP32 depth image. The harness preserves
+`source_frame_id` and timestamp, and the output lease retains its storage
+after job release.
+
+`model_path` is the canonical generation or regression snapshot selected for
+the single Lotus model entry. `PromptCache` in the model parameters names the
+small, hidden, content-bound `.lotusp` derivation for that snapshot. This
+keeps the Python and Native backends on the same canonical Safetensors files;
+the prompt sidecar is not a second model card or weight download. A
+generation sidecar cannot be used with regression weights or vice versa.
+
+The Python template passes no generator and is therefore intentionally
+stochastic. The harness accepts an optional unsigned `Seed` parameter for
+reproducible runs. Otherwise it uses `source_frame_id`, then timestamp, then
+a per-model sequence. Exact numerical validation continues to use the
+explicit-noise ABI, which removes RNG-algorithm ambiguity and validates the
+actual graph.
+
+Capability probing is conservative: host input/output and one synchronous
+in-flight job are advertised. The selected Vulkan device executes the neural
+graph, while capture upload and depth readback remain host boundaries.
+External GPU resources, asynchronous completion, and cancellation are not
+advertised.
+
+The Windows Release ABI and full-graph harness tests pass for both the
+generation and regression snapshots on the RX 9070. Each gate covers
+snapshot/prompt binding, a 768x64 BGRA image, normalized output, correlation,
+and output-lease lifetime. The underlying exact-noise image and tensor gates
+remain validated on all three GPUs as reported above.

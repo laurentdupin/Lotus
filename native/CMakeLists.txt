@@ -77,8 +77,13 @@ endif()
 target_include_directories(lotus_model PUBLIC src)
 set_target_properties(lotus_model PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_library(lotus_native SHARED src/lotus.cpp)
-target_compile_definitions(lotus_native PRIVATE LOTUS_NATIVE_BUILD)
+add_library(lotus_native SHARED
+    src/lotus.cpp
+    src/inferbridge_harness.cpp)
+target_compile_definitions(
+    lotus_native PRIVATE
+        LOTUS_NATIVE_BUILD
+        INFERBRIDGE_HARNESS_BUILDING_LIBRARY)
 target_include_directories(lotus_native PUBLIC include)
 target_link_libraries(lotus_native PRIVATE lotus_model)
 set_target_properties(
@@ -114,8 +119,18 @@ endif()
 add_executable(lotus_c_abi_smoke tests/c_abi_smoke.c)
 target_include_directories(lotus_c_abi_smoke PRIVATE include)
 target_link_libraries(lotus_c_abi_smoke PRIVATE lotus_native)
+add_executable(lotus_harness_abi_smoke tests/harness_abi_smoke.c)
+target_include_directories(lotus_harness_abi_smoke PRIVATE include)
+target_link_libraries(lotus_harness_abi_smoke PRIVATE lotus_native)
+add_executable(lotus_harness_full_graph tests/harness_full_graph.cpp)
+target_include_directories(lotus_harness_full_graph PRIVATE include)
+target_link_libraries(lotus_harness_full_graph PRIVATE lotus_native)
 
 enable_testing()
 add_test(NAME lotus_model_probe_usage COMMAND lotus_model_probe)
 set_tests_properties(lotus_model_probe_usage PROPERTIES WILL_FAIL TRUE)
 add_test(NAME lotus_c_abi_smoke COMMAND lotus_c_abi_smoke)
+add_test(NAME lotus_harness_abi_smoke COMMAND lotus_harness_abi_smoke)
+add_test(NAME lotus_harness_full_graph COMMAND lotus_harness_full_graph)
+set_tests_properties(
+    lotus_harness_full_graph PROPERTIES SKIP_RETURN_CODE 77)
