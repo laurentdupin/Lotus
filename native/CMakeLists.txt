@@ -8,11 +8,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(lotus_model STATIC
     src/model_bundle.cpp
     src/safetensors.cpp
+    src/tensor_cpu.cpp
+    src/vae_cpu.cpp
 )
 target_include_directories(lotus_model PUBLIC src)
 
 add_executable(lotus_model_probe tools/model_probe.cpp)
 target_link_libraries(lotus_model_probe PRIVATE lotus_model)
+
+add_executable(lotus_vae_probe tools/vae_probe.cpp)
+target_link_libraries(lotus_vae_probe PRIVATE lotus_model)
 
 enable_testing()
 add_test(NAME lotus_model_probe_usage COMMAND lotus_model_probe)

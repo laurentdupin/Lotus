@@ -38,6 +38,13 @@ at 64x64 with explicit posterior and initial noise. Its component anchors are:
 | One-step UNet prediction | `-1.82667851` | `1.16818595` |
 | Decoded depth | `0.0287314560` | `0.547842979` |
 
-VAE encode/decode, the single-step conditional UNet, and numerical comparison
-to this fixture remain to be implemented before this backend can advertise
-inference capability.
+The dependency-free CPU VAE now passes the Python CPU fixture:
+
+| Component | Relative L1 | Maximum absolute |
+|---|---:|---:|
+| Posterior mean | `8.27883e-7` | `2.14577e-5` |
+| Posterior log variance | `1.10318e-6` | `5.91278e-5` |
+| Decoder RGB | `5.85769e-7` | `3.45707e-6` |
+
+The single-step conditional UNet and end-to-end numerical comparison remain
+to be implemented before this backend can advertise inference capability.
