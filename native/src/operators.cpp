@@ -27,6 +27,19 @@
 #include "relu_spv.h"
 #include "softmax_lastdim_spv.h"
 #include "softmax_lastdim_half_spv.h"
+#include "group_norm_spv.h"
+#include "silu_spv.h"
+#include "nearest_spv.h"
+#include "concatenate_spv.h"
+#include "add_channel_spv.h"
+#include "nchw_tokens_spv.h"
+#include "geglu_spv.h"
+#include "attention_scores_spv.h"
+#include "attention_values_spv.h"
+#include "preprocess_rgb_spv.h"
+#include "posterior_sample_spv.h"
+#include "scale_values_spv.h"
+#include "depth_output_spv.h"
 
 #include <limits>
 #include <stdexcept>
@@ -178,7 +191,36 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           },
           16)),
       relu_(context.create_pipeline(
-          lotus_relu_spv, lotus_relu_spv_size, 2, 4)) {
+          lotus_relu_spv, lotus_relu_spv_size, 2, 4)),
+      group_norm_(context.create_pipeline(
+          lotus_group_norm_spv, lotus_group_norm_spv_size, 3, 16)),
+      silu_(context.create_pipeline(
+          lotus_silu_spv, lotus_silu_spv_size, 1, 4)),
+      nearest_(context.create_pipeline(
+          lotus_nearest_spv, lotus_nearest_spv_size, 2, 20)),
+      concatenate_(context.create_pipeline(
+          lotus_concatenate_spv, lotus_concatenate_spv_size, 3, 8)),
+      add_channel_(context.create_pipeline(
+          lotus_add_channel_spv, lotus_add_channel_spv_size, 2, 8)),
+      nchw_tokens_(context.create_pipeline(
+          lotus_nchw_tokens_spv, lotus_nchw_tokens_spv_size, 2, 12)),
+      geglu_(context.create_pipeline(
+          lotus_geglu_spv, lotus_geglu_spv_size, 2, 8)),
+      attention_scores_(context.create_pipeline(
+          lotus_attention_scores_spv,
+          lotus_attention_scores_spv_size, 3, 16)),
+      attention_values_(context.create_pipeline(
+          lotus_attention_values_spv,
+          lotus_attention_values_spv_size, 3, 16)),
+      preprocess_rgb_(context.create_pipeline(
+          lotus_preprocess_rgb_spv, lotus_preprocess_rgb_spv_size, 2, 8)),
+      posterior_sample_(context.create_pipeline(
+          lotus_posterior_sample_spv,
+          lotus_posterior_sample_spv_size, 3, 4)),
+      scale_values_(context.create_pipeline(
+          lotus_scale_values_spv, lotus_scale_values_spv_size, 1, 8)),
+      depth_output_(context.create_pipeline(
+          lotus_depth_output_spv, lotus_depth_output_spv_size, 2, 16)) {
     linear_.set_debug_name("linear");
     linear16_.set_debug_name("linear16");
     linear_half_.set_debug_name("linear_half");
@@ -212,6 +254,19 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     bilinear_align_true_image_.set_debug_name(
         "bilinear_align_true_image");
     relu_.set_debug_name("relu");
+    group_norm_.set_debug_name("group_norm");
+    silu_.set_debug_name("silu");
+    nearest_.set_debug_name("nearest");
+    concatenate_.set_debug_name("concatenate");
+    add_channel_.set_debug_name("add_channel");
+    nchw_tokens_.set_debug_name("nchw_tokens");
+    geglu_.set_debug_name("geglu");
+    attention_scores_.set_debug_name("attention_scores");
+    attention_values_.set_debug_name("attention_values");
+    preprocess_rgb_.set_debug_name("preprocess_rgb");
+    posterior_sample_.set_debug_name("posterior_sample");
+    scale_values_.set_debug_name("scale_values");
+    depth_output_.set_debug_name("depth_output");
 }
 
 void VulkanOperators::linear(
@@ -721,6 +776,47 @@ void VulkanOperators::conv2d(
         output_channel_blocks * batches);
 }
 
+void VulkanOperators::conv2d_asymmetric(
+    VulkanBuffer& output, const VulkanBuffer& input,
+    const VulkanBuffer& weight, const VulkanBuffer& bias,
+    std::uint32_t input_width, std::uint32_t input_height,
+    std::uint32_t input_channels, std::uint32_t output_channels,
+    std::uint32_t kernel, std::uint32_t stride,
+    std::uint32_t pad_before, std::uint32_t pad_after,
+    bool has_bias) {
+    const std::uint32_t output_width =
+        (input_width + pad_before + pad_after - kernel) / stride + 1;
+    const std::uint32_t output_height =
+        (input_height + pad_before + pad_after - kernel) / stride + 1;
+    require_bytes(
+        input, std::uint64_t(input_width) * input_height * input_channels,
+        "convolution input");
+    require_bytes(
+        weight, std::uint64_t(output_channels) * input_channels *
+            kernel * kernel, "convolution weight");
+    require_bytes(bias, has_bias ? output_channels : 1, "convolution bias");
+    require_bytes(
+        output, std::uint64_t(output_width) * output_height *
+            output_channels, "convolution output");
+    struct Parameters {
+        std::uint32_t input_width, input_height, input_channels;
+        std::uint32_t output_width, output_height, output_channels;
+        std::uint32_t kernel, stride;
+        std::int32_t padding;
+        std::uint32_t has_bias, batches, output_channel_blocks;
+    };
+    const std::uint32_t blocks = divide_up(output_channels, 4);
+    const Parameters parameters{
+        input_width, input_height, input_channels,
+        output_width, output_height, output_channels,
+        kernel, stride, static_cast<std::int32_t>(pad_before),
+        has_bias ? 1u : 0u, 1u, blocks};
+    context_.dispatch(
+        conv2d_, {&output, &input, &weight, &bias},
+        &parameters, sizeof(parameters),
+        divide_up(output_width, 8), divide_up(output_height, 8), blocks);
+}
+
 void VulkanOperators::conv_transpose_nonoverlap(
     VulkanBuffer& output,
     const VulkanBuffer& input,
@@ -882,6 +978,195 @@ void VulkanOperators::add(
     context_.dispatch(
         add_, {&output, &left, &right}, &count, sizeof(count),
         divide_up(count, 256));
+}
+
+void VulkanOperators::group_norm(
+    VulkanBuffer& values, const VulkanBuffer& scale,
+    const VulkanBuffer& bias, std::uint32_t channels,
+    std::uint32_t spatial, float epsilon) {
+    if (channels == 0 || channels % 32 != 0 || spatial == 0) {
+        throw std::invalid_argument("invalid group normalization dimensions");
+    }
+    require_bytes(values, std::uint64_t(channels) * spatial, "group values");
+    require_bytes(scale, channels, "group scale");
+    require_bytes(bias, channels, "group bias");
+    struct Parameters {
+        std::uint32_t channels, spatial, groups;
+        float epsilon;
+    } parameters{channels, spatial, 32, epsilon};
+    context_.dispatch(
+        group_norm_, {&values, &scale, &bias},
+        &parameters, sizeof(parameters), 32);
+}
+
+void VulkanOperators::silu(VulkanBuffer& values, std::uint32_t count) {
+    require_bytes(values, count, "SiLU values");
+    context_.dispatch(
+        silu_, {&values}, &count, sizeof(count), divide_up(count, 256));
+}
+
+void VulkanOperators::nearest(
+    VulkanBuffer& output, const VulkanBuffer& input,
+    std::uint32_t input_width, std::uint32_t input_height,
+    std::uint32_t output_width, std::uint32_t output_height,
+    std::uint32_t channels) {
+    const std::uint64_t input_count =
+        std::uint64_t(input_width) * input_height * channels;
+    const std::uint64_t output_count =
+        std::uint64_t(output_width) * output_height * channels;
+    require_bytes(input, input_count, "nearest input");
+    require_bytes(output, output_count, "nearest output");
+    struct Parameters {
+        std::uint32_t input_width, input_height, output_width,
+            output_height, channels;
+    } parameters{
+        input_width, input_height, output_width, output_height, channels};
+    context_.dispatch(
+        nearest_, {&output, &input}, &parameters, sizeof(parameters),
+        divide_up(static_cast<std::uint32_t>(output_count), 256));
+}
+
+void VulkanOperators::concatenate(
+    VulkanBuffer& output, const VulkanBuffer& left,
+    const VulkanBuffer& right, std::uint32_t left_count,
+    std::uint32_t right_count) {
+    require_bytes(left, left_count, "concat left");
+    require_bytes(right, right_count, "concat right");
+    require_bytes(
+        output, std::uint64_t(left_count) + right_count, "concat output");
+    struct Parameters {
+        std::uint32_t left_count, right_count;
+    } parameters{left_count, right_count};
+    context_.dispatch(
+        concatenate_, {&output, &left, &right},
+        &parameters, sizeof(parameters),
+        divide_up(left_count + right_count, 256));
+}
+
+void VulkanOperators::add_channel(
+    VulkanBuffer& values, const VulkanBuffer& channel,
+    std::uint32_t channels, std::uint32_t spatial) {
+    require_bytes(values, std::uint64_t(channels) * spatial, "channel values");
+    require_bytes(channel, channels, "channel vector");
+    struct Parameters {
+        std::uint32_t channels, spatial;
+    } parameters{channels, spatial};
+    context_.dispatch(
+        add_channel_, {&values, &channel}, &parameters, sizeof(parameters),
+        divide_up(channels * spatial, 256));
+}
+
+void VulkanOperators::nchw_tokens(
+    VulkanBuffer& output, const VulkanBuffer& input,
+    std::uint32_t tokens, std::uint32_t channels, bool reverse) {
+    const std::uint64_t count = std::uint64_t(tokens) * channels;
+    require_bytes(output, count, "layout output");
+    require_bytes(input, count, "layout input");
+    struct Parameters {
+        std::uint32_t tokens, channels, reverse;
+    } parameters{tokens, channels, reverse ? 1u : 0u};
+    context_.dispatch(
+        nchw_tokens_, {&output, &input}, &parameters, sizeof(parameters),
+        divide_up(static_cast<std::uint32_t>(count), 256));
+}
+
+void VulkanOperators::geglu(
+    VulkanBuffer& output, const VulkanBuffer& input,
+    std::uint32_t rows, std::uint32_t dimensions) {
+    require_bytes(input, std::uint64_t(rows) * dimensions * 2, "GEGLU input");
+    require_bytes(output, std::uint64_t(rows) * dimensions, "GEGLU output");
+    struct Parameters {
+        std::uint32_t rows, dimensions;
+    } parameters{rows, dimensions};
+    context_.dispatch(
+        geglu_, {&output, &input}, &parameters, sizeof(parameters),
+        divide_up(rows * dimensions, 256));
+}
+
+void VulkanOperators::attention_separate(
+    VulkanBuffer& output, const VulkanBuffer& query,
+    const VulkanBuffer& key, const VulkanBuffer& value,
+    std::uint32_t queries, std::uint32_t keys,
+    std::uint32_t heads, std::uint32_t head_dimensions) {
+    const std::uint32_t dimensions = heads * head_dimensions;
+    require_bytes(query, std::uint64_t(queries) * dimensions, "query");
+    require_bytes(key, std::uint64_t(keys) * dimensions, "key");
+    require_bytes(value, std::uint64_t(keys) * dimensions, "value");
+    require_bytes(output, std::uint64_t(queries) * dimensions, "attention");
+    VulkanBuffer scores = context_.create_device_buffer(
+        std::uint64_t(heads) * queries * keys * sizeof(float));
+    struct Parameters {
+        std::uint32_t queries, keys, heads, head_dimensions;
+    } parameters{queries, keys, heads, head_dimensions};
+    context_.dispatch(
+        attention_scores_, {&scores, &query, &key},
+        &parameters, sizeof(parameters), divide_up(keys, 64),
+        queries * heads);
+    struct SoftmaxParameters {
+        std::uint32_t rows, columns;
+    } softmax{heads * queries, keys};
+    context_.dispatch(
+        softmax_lastdim_, {&scores, &scores},
+        &softmax, sizeof(softmax), softmax.rows);
+    context_.dispatch(
+        attention_values_, {&output, &scores, &value},
+        &parameters, sizeof(parameters),
+        divide_up(head_dimensions, 64), queries * heads);
+}
+
+void VulkanOperators::preprocess_rgb(
+    VulkanBuffer& output, const VulkanBuffer& input,
+    std::uint32_t width, std::uint32_t height) {
+    const std::uint64_t count = std::uint64_t(width) * height * 3;
+    require_bytes(output, count, "RGB output");
+    require_bytes(input, count, "RGB input");
+    struct Parameters {
+        std::uint32_t width, height;
+    } parameters{width, height};
+    context_.dispatch(
+        preprocess_rgb_, {&output, &input}, &parameters, sizeof(parameters),
+        divide_up(static_cast<std::uint32_t>(count), 256));
+}
+
+void VulkanOperators::posterior_sample(
+    VulkanBuffer& output, const VulkanBuffer& posterior,
+    const VulkanBuffer& noise, std::uint32_t count) {
+    require_bytes(output, count, "posterior output");
+    require_bytes(posterior, std::uint64_t(count) * 2, "posterior");
+    require_bytes(noise, count, "posterior noise");
+    context_.dispatch(
+        posterior_sample_, {&output, &posterior, &noise},
+        &count, sizeof(count), divide_up(count, 256));
+}
+
+void VulkanOperators::scale_values(
+    VulkanBuffer& values, std::uint32_t count, float scale) {
+    require_bytes(values, count, "scaled values");
+    struct Parameters {
+        std::uint32_t count;
+        float scale;
+    } parameters{count, scale};
+    context_.dispatch(
+        scale_values_, {&values}, &parameters, sizeof(parameters),
+        divide_up(count, 256));
+}
+
+void VulkanOperators::depth_output(
+    VulkanBuffer& output, const VulkanBuffer& decoded,
+    std::uint32_t source_width, std::uint32_t source_height,
+    std::uint32_t target_width, std::uint32_t target_height) {
+    require_bytes(
+        decoded, std::uint64_t(source_width) * source_height * 3,
+        "decoded image");
+    require_bytes(
+        output, std::uint64_t(target_width) * target_height, "depth");
+    struct Parameters {
+        std::uint32_t source_width, source_height, target_width, target_height;
+    } parameters{
+        source_width, source_height, target_width, target_height};
+    context_.dispatch(
+        depth_output_, {&output, &decoded}, &parameters, sizeof(parameters),
+        divide_up(target_width * target_height, 256));
 }
 
 }  // namespace lotus_native

@@ -53,7 +53,7 @@ maximum absolute error `2.18749e-5`.
 
 ## Full native DLL gate
 
-`lotus_native.dll` exposes ABI 1 lifecycle and inference calls. The exact
+`lotus_native.dll` exposes ABI 2 lifecycle and inference calls. The exact
 validation entry accepts explicit initial and VAE-posterior noise, removing
 stochastic ambiguity while comparing the complete graph against Python CPU.
 The normal entry owns a stable seeded native RNG.
@@ -65,5 +65,23 @@ The normal entry owns a stable seeded native RNG.
 | Non-multiple input | `65x73` passed |
 | C ABI smoke test | passed |
 
-The implementation is a correctness-first CPU oracle. It does not advertise
-Vulkan or GPU residency yet.
+The additive `lotus_create_vulkan` entry maps the same canonical UNet and VAE
+files into a dependency-free full Vulkan graph and fails rather than falling
+back to CPU. RGB upload and final depth download remain at the tensor ABI
+boundary; VAE encoding, posterior sampling, conditional UNet, VAE decoding,
+and every intermediate stay on the selected GPU.
+
+| GPU | Full 64x64 relative L1 | Maximum absolute |
+|---|---:|---:|
+| Radeon RX 9070 | `7.33747e-6` | `1.19284e-5` |
+| GeForce GTX 1080 | `8.36691e-6` | `2.21133e-5` |
+| Radeon RX 6700 XT | `6.97460e-6` | `1.29789e-5` |
+
+Five consecutive calls on persistent contexts also passed. Concurrent canary
+medians were 569.98 ms (RX 9070), 711.28 ms (GTX 1080), and 327.01 ms
+(RX 6700 XT); they are stability measurements for this untuned FP32 graph,
+not isolated comparative benchmarks.
+
+This is the FP32 correctness baseline. Mixed precision and external
+GPU-resource import/export are not advertised until separate accuracy and
+interop gates pass.

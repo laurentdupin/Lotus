@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define LOTUS_NATIVE_ABI_VERSION 1u
+#define LOTUS_NATIVE_ABI_VERSION 2u
 
 typedef struct lotus_context lotus_context;
 
@@ -34,6 +34,11 @@ LOTUS_API const char* lotus_last_error(void);
 LOTUS_API int lotus_create(
     const char* snapshot_root_utf8,
     const char* empty_prompt_cache_utf8,
+    lotus_context** output);
+LOTUS_API int lotus_create_vulkan(
+    const char* snapshot_root_utf8,
+    const char* empty_prompt_cache_utf8,
+    uint32_t device_index,
     lotus_context** output);
 LOTUS_API void lotus_destroy(lotus_context* context);
 

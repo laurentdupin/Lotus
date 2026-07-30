@@ -88,6 +88,14 @@ public:
         bool block8 = false,
         bool half_weight = false,
         std::uint32_t batches = 1);
+    void conv2d_asymmetric(
+        VulkanBuffer& output, const VulkanBuffer& input,
+        const VulkanBuffer& weight, const VulkanBuffer& bias,
+        std::uint32_t input_width, std::uint32_t input_height,
+        std::uint32_t input_channels, std::uint32_t output_channels,
+        std::uint32_t kernel, std::uint32_t stride,
+        std::uint32_t pad_before, std::uint32_t pad_after,
+        bool has_bias);
 
     void conv_transpose_nonoverlap(
         VulkanBuffer& output,
@@ -126,6 +134,46 @@ public:
         const VulkanBuffer& left,
         const VulkanBuffer& right,
         std::uint32_t count);
+    void group_norm(
+        VulkanBuffer& values, const VulkanBuffer& scale,
+        const VulkanBuffer& bias, std::uint32_t channels,
+        std::uint32_t spatial, float epsilon);
+    void silu(VulkanBuffer& values, std::uint32_t count);
+    void nearest(
+        VulkanBuffer& output, const VulkanBuffer& input,
+        std::uint32_t input_width, std::uint32_t input_height,
+        std::uint32_t output_width, std::uint32_t output_height,
+        std::uint32_t channels);
+    void concatenate(
+        VulkanBuffer& output, const VulkanBuffer& left,
+        const VulkanBuffer& right, std::uint32_t left_count,
+        std::uint32_t right_count);
+    void add_channel(
+        VulkanBuffer& values, const VulkanBuffer& channel,
+        std::uint32_t channels, std::uint32_t spatial);
+    void nchw_tokens(
+        VulkanBuffer& output, const VulkanBuffer& input,
+        std::uint32_t tokens, std::uint32_t channels, bool reverse);
+    void geglu(
+        VulkanBuffer& output, const VulkanBuffer& input,
+        std::uint32_t rows, std::uint32_t dimensions);
+    void attention_separate(
+        VulkanBuffer& output, const VulkanBuffer& query,
+        const VulkanBuffer& key, const VulkanBuffer& value,
+        std::uint32_t queries, std::uint32_t keys,
+        std::uint32_t heads, std::uint32_t head_dimensions = 64);
+    void preprocess_rgb(
+        VulkanBuffer& output, const VulkanBuffer& input,
+        std::uint32_t width, std::uint32_t height);
+    void posterior_sample(
+        VulkanBuffer& output, const VulkanBuffer& posterior,
+        const VulkanBuffer& noise, std::uint32_t count);
+    void scale_values(
+        VulkanBuffer& values, std::uint32_t count, float scale);
+    void depth_output(
+        VulkanBuffer& output, const VulkanBuffer& decoded,
+        std::uint32_t source_width, std::uint32_t source_height,
+        std::uint32_t target_width, std::uint32_t target_height);
 
 private:
     VulkanContext& context_;
@@ -156,6 +204,19 @@ private:
     VulkanPipeline bilinear_align_true_;
     VulkanPipeline bilinear_align_true_image_;
     VulkanPipeline relu_;
+    VulkanPipeline group_norm_;
+    VulkanPipeline silu_;
+    VulkanPipeline nearest_;
+    VulkanPipeline concatenate_;
+    VulkanPipeline add_channel_;
+    VulkanPipeline nchw_tokens_;
+    VulkanPipeline geglu_;
+    VulkanPipeline attention_scores_;
+    VulkanPipeline attention_values_;
+    VulkanPipeline preprocess_rgb_;
+    VulkanPipeline posterior_sample_;
+    VulkanPipeline scale_values_;
+    VulkanPipeline depth_output_;
 };
 
 }  // namespace lotus_native

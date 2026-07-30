@@ -4,6 +4,12 @@
 #include "prompt_cache.h"
 #include "unet_cpu.h"
 #include "vae_cpu.h"
+#if defined(LOTUS_WITH_VULKAN)
+#include "gpu_model.h"
+#include "lotus_gpu.h"
+#include "operators.h"
+#include "vulkan.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -17,6 +23,12 @@
 struct lotus_context {
     std::unique_ptr<lotus_native::ModelBundle> model;
     lotus_native::TokenTensor prompt;
+#if defined(LOTUS_WITH_VULKAN)
+    std::unique_ptr<lotus_native::VulkanContext> vulkan;
+    std::unique_ptr<lotus_native::GpuModel> gpu_unet;
+    std::unique_ptr<lotus_native::GpuModel> gpu_vae;
+    std::unique_ptr<lotus_native::VulkanOperators> operators;
+#endif
 };
 
 namespace {
@@ -159,6 +171,44 @@ int lotus_create(
     }
 }
 
+int lotus_create_vulkan(
+    const char* snapshot_root,
+    const char* prompt_cache,
+    std::uint32_t device_index,
+    lotus_context** output) {
+    if (!snapshot_root || !prompt_cache || !output) {
+        return fail(LOTUS_INVALID_ARGUMENT, "invalid Lotus create argument");
+    }
+    *output = nullptr;
+#if !defined(LOTUS_WITH_VULKAN)
+    (void)device_index;
+    return fail(LOTUS_RUNTIME_ERROR, "this DLL was built without Vulkan");
+#else
+    try {
+        auto context = std::make_unique<lotus_context>();
+        context->model =
+            std::make_unique<lotus_native::ModelBundle>(
+                snapshot_root, false);
+        context->prompt =
+            lotus_native::load_empty_prompt_cache(prompt_cache);
+        context->vulkan =
+            std::make_unique<lotus_native::VulkanContext>(device_index);
+        context->gpu_unet = std::make_unique<lotus_native::GpuModel>(
+            context->model->unet(), *context->vulkan);
+        context->gpu_vae = std::make_unique<lotus_native::GpuModel>(
+            context->model->vae(), *context->vulkan);
+        context->operators =
+            std::make_unique<lotus_native::VulkanOperators>(
+                *context->vulkan);
+        *output = context.release();
+        last_error.clear();
+        return LOTUS_OK;
+    } catch (const std::exception& error) {
+        return fail(LOTUS_MODEL_ERROR, error);
+    }
+#endif
+}
+
 void lotus_destroy(lotus_context* context) {
     delete context;
 }
@@ -175,6 +225,21 @@ int lotus_infer_rgb_f32_with_noise(
         return fail(LOTUS_INVALID_ARGUMENT, "invalid Lotus inference argument");
     }
     try {
+#if defined(LOTUS_WITH_VULKAN)
+        if (context->vulkan) {
+            lotus_native::VulkanBuffer output =
+                lotus_native::lotus_infer_gpu(
+                    *context->vulkan, *context->gpu_unet,
+                    *context->gpu_vae, *context->operators,
+                    context->prompt, rgb, width, height,
+                    initial_noise, posterior_noise);
+            context->vulkan->download(
+                output, depth,
+                std::uint64_t(width) * height * sizeof(float));
+            last_error.clear();
+            return LOTUS_OK;
+        }
+#endif
         output_depth(
             infer(
                 *context, rgb, width, height,

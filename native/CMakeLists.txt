@@ -46,7 +46,10 @@ if(LOTUS_WITH_VULKAN)
             conv_transpose_nonoverlap conv_transpose_nonoverlap_half
             elementwise gelu layer_norm linear linear16 linear_half
             linear16_half prepare_tokens position_bicubic project_tokens
-            project_tokens_half relu softmax_lastdim softmax_lastdim_half)
+            project_tokens_half relu softmax_lastdim softmax_lastdim_half
+            group_norm silu nearest concatenate add_channel nchw_tokens
+            geglu attention_scores attention_values preprocess_rgb
+            posterior_sample scale_values depth_output)
         lotus_compile_shader(${SHADER})
     endforeach()
 endif()
@@ -63,10 +66,11 @@ add_library(lotus_model STATIC
 if(LOTUS_WITH_VULKAN)
     target_sources(lotus_model PRIVATE
         src/vulkan.cpp src/operators.cpp src/gpu_model.cpp
+        src/lotus_gpu.cpp
         ${LOTUS_SHADER_HEADERS})
     target_include_directories(
         lotus_model PRIVATE "${LOTUS_GENERATED_DIR}")
-    target_link_libraries(lotus_model PRIVATE Vulkan::Vulkan)
+    target_link_libraries(lotus_model PUBLIC Vulkan::Vulkan)
     target_compile_definitions(
         lotus_model PUBLIC LOTUS_WITH_VULKAN=1)
 endif()
@@ -98,6 +102,14 @@ target_link_libraries(lotus_full_graph_probe PRIVATE lotus_native)
 add_executable(lotus_size_probe tools/size_probe.cpp)
 target_include_directories(lotus_size_probe PRIVATE include)
 target_link_libraries(lotus_size_probe PRIVATE lotus_native)
+if(LOTUS_WITH_VULKAN)
+    add_executable(
+        lotus_gpu_component_probe tools/gpu_component_probe.cpp)
+    target_link_libraries(
+        lotus_gpu_component_probe PRIVATE lotus_model)
+    target_include_directories(
+        lotus_gpu_component_probe PRIVATE src)
+endif()
 
 add_executable(lotus_c_abi_smoke tests/c_abi_smoke.c)
 target_include_directories(lotus_c_abi_smoke PRIVATE include)
