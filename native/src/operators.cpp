@@ -16,6 +16,7 @@
 #include "conv2d8_tiled_spv.h"
 #include "conv2d8_stride2_tiled_spv.h"
 #include "conv2d8_tiled16x8_spv.h"
+#include "conv2d_winograd_spv.h"
 #include "conv_transpose_nonoverlap_spv.h"
 #include "conv_transpose_nonoverlap_half_spv.h"
 #include "gelu_spv.h"
@@ -197,6 +198,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           lotus_conv2d8_tiled16x8_spv_size,
           4,
           48)),
+      conv2d_winograd_(context.create_pipeline(
+          lotus_conv2d_winograd_spv,
+          lotus_conv2d_winograd_spv_size,
+          4,
+          48)),
       conv_transpose_nonoverlap_(context.create_pipeline(
           lotus_conv_transpose_nonoverlap_spv,
           lotus_conv_transpose_nonoverlap_spv_size,
@@ -281,6 +287,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv2d8_stride2_tiled_.set_debug_name(
         "conv2d8_stride2_tiled");
     conv2d8_tiled16x8_.set_debug_name("conv2d8_tiled16x8");
+    conv2d_winograd_.set_debug_name("conv2d_winograd");
     conv_transpose_nonoverlap_.set_debug_name(
         "conv_transpose_nonoverlap");
     conv_transpose_nonoverlap_half_.set_debug_name(
@@ -828,7 +835,7 @@ void VulkanOperators::conv2d_asymmetric(
     std::uint32_t input_channels, std::uint32_t output_channels,
     std::uint32_t kernel, std::uint32_t stride,
     std::uint32_t pad_before, std::uint32_t pad_after,
-    bool has_bias) {
+    bool has_bias, bool winograd) {
     const std::uint32_t output_width =
         (input_width + pad_before + pad_after - kernel) / stride + 1;
     const std::uint32_t output_height =
@@ -851,7 +858,7 @@ void VulkanOperators::conv2d_asymmetric(
         std::uint32_t has_bias, batches, output_channel_blocks;
     };
     const bool tiled =
-        kernel == 3 && stride == 1 && pad_before == 1 &&
+        !winograd && kernel == 3 && stride == 1 && pad_before == 1 &&
         pad_after == 1 && input_width == output_width &&
         input_height == output_height &&
         context_.subgroup_size() == 32;
@@ -859,20 +866,26 @@ void VulkanOperators::conv2d_asymmetric(
         kernel == 3 && stride == 2 &&
         context_.subgroup_size() == 32;
     const std::uint32_t blocks =
-        divide_up(output_channels, tiled ? 8 :
-            (stride2_tiled ? 8 : 4));
+        divide_up(output_channels, winograd ? 4 : (tiled ? 8 :
+            (stride2_tiled ? 8 : 4)));
     const Parameters parameters{
         input_width, input_height, input_channels,
         output_width, output_height, output_channels,
         kernel, stride, static_cast<std::int32_t>(pad_before),
         has_bias ? 1u : 0u, 1u, blocks};
     context_.dispatch(
-        tiled ? conv2d8_tiled16x8_ :
-        (stride2_tiled ? conv2d8_stride2_tiled_ : conv2d_),
+        winograd ? conv2d_winograd_ :
+        (tiled ? conv2d8_tiled16x8_ :
+        (stride2_tiled ? conv2d8_stride2_tiled_ : conv2d_)),
         {&output, &input, &weight, &bias},
         &parameters, sizeof(parameters),
-        divide_up(output_width, tiled ? 16 : 8),
-        divide_up(output_height, 8), blocks);
+        winograd
+            ? divide_up(divide_up(output_width, 2), 8)
+            : divide_up(output_width, tiled ? 16 : 8),
+        winograd
+            ? divide_up(divide_up(output_height, 2), 8)
+            : divide_up(output_height, 8),
+        blocks);
 }
 
 void VulkanOperators::conv_transpose_nonoverlap(
