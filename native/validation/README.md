@@ -108,6 +108,21 @@ change passed on all three adapters with unchanged numerical results; observed
 medians were `246.5 ms` (RX 9070), `630.4 ms` (GTX 1080), and `214.3 ms`
 (RX 6700 XT).
 
+## Wave32 packed-weight pass
+
+The Wave32 path packs linear and 3x3 convolution weights in input-major,
+output-contiguous FP16 storage while retaining FP32 activation and
+accumulation. Normalization plus SiLU is fused, ResNet residuals no longer
+make redundant device copies, and the shared timestep activation is computed
+once per inference. The pointwise and linear tiles also use bank-safe shared
+memory layouts.
+
+For the discriminative 64x64 fixture, isolated persistent-context medians
+were `96.35 ms` on Radeon RX 9070, `106.621 ms` on GeForce GTX 1080
+(101 calls), and `95.981 ms` on Radeon RX 6700 XT. The final relative L1
+deviation was `0.000629` (`0.0629%`) on all three adapters, with maximum
+absolute deviation below `0.00157`.
+
 ## Discriminative checkpoint
 
 The same ABI now detects and executes InferBridge's selectable regression

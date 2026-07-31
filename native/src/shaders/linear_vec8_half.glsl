@@ -2,13 +2,15 @@
 layout(local_size_x=16,local_size_y=8,local_size_z=1) in;
 layout(set=0,binding=0,std430) writeonly buffer O{float d[];}o;
 layout(set=0,binding=1,std430) readonly buffer I{vec4 d[];}i;
-layout(set=0,binding=2,std430) readonly buffer W{vec4 d[];}w;
+layout(set=0,binding=2,std430) readonly buffer W{uint d[];}w;
 layout(set=0,binding=3,std430) readonly buffer B{float d[];}b;
 layout(push_constant) uniform P{uint rows;uint inputs;uint outputs;}p;
 #define K 8
 #define KS 9
 shared vec4 it[40*KS];
 shared vec4 wt[64*KS];
+vec4 rw4(uint n){return vec4(
+ unpackHalf2x16(w.d[n>>1]),unpackHalf2x16(w.d[(n>>1)+1]));}
 void main(){
  uint cb=gl_WorkGroupID.x*64+gl_LocalInvocationID.x;
  uint rb=gl_WorkGroupID.y*40+gl_LocalInvocationID.y*5;
@@ -25,7 +27,7 @@ void main(){
   for(uint n=lane;n<64*K;n+=128){
    uint tc=n/K,inner=base+n%K,col=gl_WorkGroupID.x*64+tc;
    wt[tc*KS+n%K]=col<p.outputs&&inner<iv
-    ?w.d[col*iv+inner]:vec4(0.0);
+    ?rw4((inner*p.outputs+col)*4):vec4(0.0);
   }
   barrier();
   uint count=min(K,iv-base);
