@@ -166,6 +166,13 @@ public:
     void preprocess_rgb(
         VulkanBuffer& output, const VulkanBuffer& input,
         std::uint32_t width, std::uint32_t height);
+    void preprocess_texture(
+        VulkanBuffer& output, const VulkanImage& input,
+        std::uint32_t source_width, std::uint32_t source_height,
+        std::uint32_t target_width, std::uint32_t target_height);
+    void seeded_noise(
+        VulkanBuffer& initial, VulkanBuffer& posterior,
+        std::uint32_t count, std::uint64_t seed);
     void posterior_sample(
         VulkanBuffer& output, const VulkanBuffer& posterior,
         const VulkanBuffer& noise, std::uint32_t count);
@@ -175,6 +182,10 @@ public:
         VulkanBuffer& output, const VulkanBuffer& decoded,
         std::uint32_t source_width, std::uint32_t source_height,
         std::uint32_t target_width, std::uint32_t target_height);
+    void normalize_depth(VulkanBuffer& depth, std::uint32_t count);
+    void depth_to_image(
+        VulkanImage& output, const VulkanBuffer& depth,
+        std::uint32_t width, std::uint32_t height);
 
 private:
     VulkanContext& context_;
@@ -226,9 +237,14 @@ private:
     VulkanPipeline attention_scores_;
     VulkanPipeline attention_values_;
     VulkanPipeline preprocess_rgb_;
+    VulkanPipeline preprocess_texture_;
+    VulkanPipeline seeded_noise_;
     VulkanPipeline posterior_sample_;
     VulkanPipeline scale_values_;
     VulkanPipeline depth_output_;
+    VulkanPipeline depth_range_;
+    VulkanPipeline normalize_depth_;
+    VulkanPipeline depth_to_image_;
 };
 
 }  // namespace lotus_native

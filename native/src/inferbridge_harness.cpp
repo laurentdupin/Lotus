@@ -1,24 +1,52 @@
 #include "inferbridge_harness.h"
 
 #include "lotus_native.h"
+#if defined(LOTUS_WITH_VULKAN)
+#include "external_gpu.h"
+#endif
 
+#include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <new>
+#include <stdexcept>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
+class LotusGpuWorker;
+struct LotusGpuAdmission;
 
 struct ibrh_runtime {
     std::string error;
     int32_t vulkan_device_index = 0;
+    uint64_t adapter_luid = 0u;
 };
 
 struct ibrh_model {
     ibrh_runtime* runtime = nullptr;
     lotus_context* context = nullptr;
+    std::string model_path;
+    std::string prompt_cache;
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+    std::shared_ptr<lotus_native::ExternalGpu> external_gpu;
+    std::shared_ptr<LotusGpuWorker> gpu_worker;
+    std::shared_ptr<std::atomic<uint32_t>> gpu_admissions =
+        std::make_shared<std::atomic<uint32_t>>(0u);
+#endif
     std::atomic<uint64_t> next_seed{1u};
     std::mutex submit_mutex;
 };
@@ -30,17 +58,43 @@ struct ibrh_job {
     uint32_t width = 0u;
     uint32_t height = 0u;
     std::vector<float> depth;
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+    mutable std::mutex gpu_mutex;
+    std::shared_ptr<lotus_native::ExternalJob> gpu_job;
+    std::shared_ptr<LotusGpuAdmission> gpu_admission;
+    std::weak_ptr<LotusGpuWorker> gpu_worker;
+    std::atomic<uint32_t> gpu_state{IBRH_JOB_COMPLETE};
+    std::atomic<bool> cancel_requested{false};
+    std::string gpu_error;
+    uintptr_t input_texture_handle = 0u;
+    uintptr_t input_fence_handle = 0u;
+    uint64_t input_fence_value = 0u;
+    uint64_t seed = 0u;
+    bool rgba = false;
+    ~ibrh_job() {
+        gpu_job.reset();
+        gpu_admission.reset();
+        if (input_texture_handle)
+            CloseHandle(reinterpret_cast<HANDLE>(input_texture_handle));
+        if (input_fence_handle)
+            CloseHandle(reinterpret_cast<HANDLE>(input_fence_handle));
+    }
+#endif
 };
 
 struct ibrh_output_lease {
     ibrh_job* job = nullptr;
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+    std::shared_ptr<lotus_native::ExternalJob> gpu_job;
+    std::shared_ptr<LotusGpuAdmission> gpu_admission;
+#endif
 };
 
 namespace {
 
 thread_local std::string g_last_error;
 constexpr char kHarnessId[] = "inferbridge.lotus.native";
-constexpr char kHarnessVersion[] = "1.0.0";
+constexpr char kHarnessVersion[] = "1.1.0";
 
 ibrh_result fail(
     ibrh_runtime* runtime, ibrh_result result, const std::string& message) {
@@ -100,6 +154,46 @@ bool json_uint64(
     return true;
 }
 
+bool parse_luid(const std::string& value, uint64_t& result) {
+    if (value.size() != 16u) return false;
+    const auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    uint8_t bytes[8]{};
+    for (size_t i = 0; i < 8u; ++i) {
+        const int high = nibble(value[i * 2u]);
+        const int low = nibble(value[i * 2u + 1u]);
+        if (high < 0 || low < 0) return false;
+        bytes[i] = static_cast<uint8_t>((high << 4) | low);
+    }
+    std::memcpy(&result, bytes, sizeof(result));
+    return true;
+}
+
+bool device_index_for_luid(uint64_t luid, int32_t& device_index) {
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+    for (int32_t index = 0; index < 32; ++index) {
+        try {
+            const auto capabilities = lotus_native::probe_external_gpu(index);
+            if (capabilities.available && capabilities.adapter_luid == luid) {
+                device_index = index;
+                return true;
+            }
+        } catch (...) {
+            if (index == 0) return false;
+            break;
+        }
+    }
+#else
+    (void)luid;
+    (void)device_index;
+#endif
+    return false;
+}
+
 ibrh_result status_result(int status) {
     switch (status) {
         case LOTUS_OK: return IBRH_OK;
@@ -120,6 +214,128 @@ void release_job(ibrh_job* job) {
     if (job != nullptr && job->references.fetch_sub(1u) == 1u) delete job;
 }
 
+}  // namespace
+
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+void close_gpu_input_handles(ibrh_job& job) noexcept {
+    const auto texture = reinterpret_cast<HANDLE>(
+        std::exchange(job.input_texture_handle, 0u));
+    const auto fence = reinterpret_cast<HANDLE>(
+        std::exchange(job.input_fence_handle, 0u));
+    if (texture) CloseHandle(texture);
+    if (fence) CloseHandle(fence);
+}
+
+struct LotusGpuAdmission {
+    explicit LotusGpuAdmission(std::shared_ptr<std::atomic<uint32_t>> value)
+        : count(std::move(value)) {}
+    ~LotusGpuAdmission() { count->fetch_sub(1u); }
+    std::shared_ptr<std::atomic<uint32_t>> count;
+};
+
+class LotusGpuWorker {
+public:
+    explicit LotusGpuWorker(std::shared_ptr<lotus_native::ExternalGpu> gpu)
+        : gpu_(std::move(gpu)), thread_([this] { run(); }) {}
+    ~LotusGpuWorker() { stop(); }
+    void enqueue(ibrh_job* job) {
+        retain_job(job);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) {
+                release_job(job);
+                throw std::runtime_error("Lotus GPU worker is stopping");
+            }
+            queue_.push_back(job);
+        }
+        condition_.notify_one();
+    }
+    bool cancel_queued(ibrh_job* job) noexcept {
+        bool removed = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto found = std::find(queue_.begin(), queue_.end(), job);
+            if (found != queue_.end()) {
+                queue_.erase(found);
+                removed = true;
+            }
+        }
+        if (removed) {
+            job->gpu_state.store(IBRH_JOB_CANCELLED);
+            close_gpu_input_handles(*job);
+            release_job(job);
+        }
+        return removed;
+    }
+    void stop() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        condition_.notify_all();
+        if (thread_.joinable()) thread_.join();
+    }
+private:
+    void run() noexcept {
+        for (;;) {
+            ibrh_job* job = nullptr;
+            bool stopping = false;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                condition_.wait(lock, [&] { return stopping_ || !queue_.empty(); });
+                if (queue_.empty()) {
+                    if (stopping_) return;
+                    continue;
+                }
+                job = queue_.front();
+                queue_.pop_front();
+                stopping = stopping_;
+            }
+            if (stopping || job->cancel_requested.load()) {
+                job->gpu_state.store(IBRH_JOB_CANCELLED);
+                close_gpu_input_handles(*job);
+                release_job(job);
+                continue;
+            }
+            try {
+                auto native = gpu_->submit_texture({
+                    job->input_texture_handle, job->width, job->height,
+                    job->rgba, job->input_fence_handle,
+                    job->input_fence_value, job->seed,
+                    job->source_frame_id, job->timestamp_ns});
+                close_gpu_input_handles(*job);
+                if (job->cancel_requested.load()) native->cancel();
+                {
+                    std::lock_guard<std::mutex> lock(job->gpu_mutex);
+                    job->gpu_job = std::move(native);
+                }
+                job->gpu_state.store(job->cancel_requested.load() ?
+                    IBRH_JOB_CANCELLED : IBRH_JOB_RUNNING);
+            } catch (const std::exception& error) {
+                close_gpu_input_handles(*job);
+                {
+                    std::lock_guard<std::mutex> lock(job->gpu_mutex);
+                    job->gpu_error = error.what();
+                }
+                job->gpu_state.store(job->cancel_requested.load() ?
+                    IBRH_JOB_CANCELLED : IBRH_JOB_FAILED);
+            }
+            release_job(job);
+        }
+    }
+    std::shared_ptr<lotus_native::ExternalGpu> gpu_;
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::deque<ibrh_job*> queue_;
+    bool stopping_ = false;
+    std::thread thread_;
+};
+#else
+struct LotusGpuAdmission {};
+#endif
+
+namespace {
+
 ibrh_result IBRH_CALL query_capabilities(
     size_t capabilities_size, ibrh_capabilities* capabilities) {
     if (capabilities == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
@@ -136,6 +352,23 @@ ibrh_result IBRH_CALL query_capabilities(
     capabilities->maximum_inputs = 1u;
     capabilities->maximum_outputs = 1u;
     capabilities->maximum_in_flight_jobs = 1u;
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+    try {
+        if (lotus_native::probe_external_gpu(0u).available) {
+            capabilities->flags |= IBRH_CAP_ASYNC_SUBMIT |
+                IBRH_CAP_CANCELLATION | IBRH_CAP_GPU_RESOURCES |
+                IBRH_CAP_EXTERNAL_SYNCHRONIZATION |
+                IBRH_CAP_GPU_RESIDENT_OUTPUT;
+            capabilities->input_domain_mask |=
+                1ull << IBRH_RESOURCE_DOMAIN_D3D12;
+            capabilities->output_domain_mask |=
+                1ull << IBRH_RESOURCE_DOMAIN_D3D12;
+            capabilities->synchronization_mask =
+                1ull << IBRH_SYNC_D3D12_FENCE;
+            capabilities->maximum_in_flight_jobs = 3u;
+        }
+    } catch (...) {}
+#endif
     capabilities->harness_id = {kHarnessId, sizeof(kHarnessId) - 1u};
     capabilities->harness_version = {
         kHarnessVersion, sizeof(kHarnessVersion) - 1u};
@@ -165,12 +398,15 @@ ibrh_result IBRH_CALL runtime_create(
         runtime->vulkan_device_index = static_cast<int32_t>(index);
     }
     std::string luid_text;
-    if (!json_uint64(device, "index", index) &&
-        json_string(device, "luid", luid_text) && !luid_text.empty()) {
-        delete runtime;
-        return fail(
-            nullptr, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
-            "Lotus requires a Vulkan device index when a LUID is requested");
+    if (json_string(device, "luid", luid_text) && !luid_text.empty()) {
+        uint64_t luid = 0u;
+        if (!parse_luid(luid_text, luid) ||
+            !device_index_for_luid(luid, runtime->vulkan_device_index)) {
+            delete runtime;
+            return fail(nullptr, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
+                        "Lotus could not match the requested GPU LUID");
+        }
+        runtime->adapter_luid = luid;
     }
     *output = runtime;
     return IBRH_OK;
@@ -205,17 +441,39 @@ ibrh_result IBRH_CALL model_load(
     auto* model = new (std::nothrow) ibrh_model();
     if (model == nullptr) return IBRH_ERROR_INTERNAL;
     model->runtime = runtime;
-    const int status =
-        lotus_create_vulkan(
-            path.c_str(),
-            prompt_cache.c_str(),
+    model->model_path = path;
+    model->prompt_cache = prompt_cache;
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+    if (runtime->adapter_luid != 0u) {
+        try {
+            model->external_gpu = lotus_native::create_external_gpu(
+                path, prompt_cache,
+                static_cast<uint32_t>(runtime->vulkan_device_index));
+            const auto capabilities = model->external_gpu->capabilities();
+            if (!capabilities.available ||
+                capabilities.adapter_luid != runtime->adapter_luid)
+                throw std::runtime_error(
+                    "Lotus loaded on a GPU other than the requested LUID");
+            model->gpu_worker = std::make_shared<LotusGpuWorker>(
+                model->external_gpu);
+        } catch (const std::exception& error) {
+            delete model;
+            return fail(runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
+                        error.what());
+        }
+    } else
+#endif
+    {
+        const int status = lotus_create_vulkan(
+            path.c_str(), prompt_cache.c_str(),
             static_cast<uint32_t>(runtime->vulkan_device_index),
             &model->context);
-    if (status != LOTUS_OK) {
-        const std::string message =
-            std::string("Lotus model load failed: ") + lotus_last_error();
-        delete model;
-        return fail(runtime, status_result(status), message);
+        if (status != LOTUS_OK) {
+            const std::string message =
+                std::string("Lotus model load failed: ") + lotus_last_error();
+            delete model;
+            return fail(runtime, status_result(status), message);
+        }
     }
     *output = model;
     return IBRH_OK;
@@ -223,7 +481,12 @@ ibrh_result IBRH_CALL model_load(
 
 void IBRH_CALL model_unload(ibrh_model* model) {
     if (model == nullptr) return;
-    lotus_destroy(model->context);
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+    if (model->gpu_worker) model->gpu_worker->stop();
+    model->gpu_worker.reset();
+    model->external_gpu.reset();
+#endif
+    if (model->context) lotus_destroy(model->context);
     delete model;
 }
 
@@ -240,13 +503,107 @@ ibrh_result IBRH_CALL submit(
         return fail(
             model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
             "Lotus requires exactly one BGRA8 input");
-    if (request->synchronization_count != 0u)
-        return fail(
-            model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
-            "Lotus host harness does not accept external synchronization");
     const ibrh_resource& input = request->inputs[0];
     if (input.struct_size < sizeof(input))
         return IBRH_ERROR_STRUCT_TOO_SMALL;
+    uint64_t seed =
+        request->source_frame_id != 0u ? request->source_frame_id :
+        request->timestamp_ns != 0u ? request->timestamp_ns :
+        model->next_seed.fetch_add(1u);
+    const std::string submit_parameters = copy_string(request->parameters_json);
+    if (submit_parameters.find("\"Seed\"") != std::string::npos &&
+        !json_uint64(submit_parameters, "Seed", seed))
+        return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
+                    "Lotus Seed must be an unsigned integer");
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+    if (input.domain == IBRH_RESOURCE_DOMAIN_D3D12 &&
+        input.kind == IBRH_RESOURCE_KIND_IMAGE_2D &&
+        input.native_handle_type == IBRH_NATIVE_HANDLE_WIN32_SHARED) {
+        if (!model->gpu_worker)
+            return fail(model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
+                        "Lotus GPU model was not loaded for external input");
+        if (input.pixel_format != IBRH_PIXEL_BGRA8 ||
+            !input.native_handle || !input.width || !input.height)
+            return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
+                        "Lotus external texture descriptor is invalid");
+        const ibrh_synchronization* wait = nullptr;
+        for (uint32_t i = 0u; i < request->synchronization_count; ++i) {
+            const auto& candidate = request->synchronizations[i];
+            if (candidate.struct_size < sizeof(candidate))
+                return IBRH_ERROR_STRUCT_TOO_SMALL;
+            if (candidate.kind == IBRH_SYNC_D3D12_FENCE &&
+                candidate.operation == IBRH_SYNC_WAIT &&
+                candidate.native_handle_type == IBRH_NATIVE_HANDLE_WIN32_SHARED) {
+                if (wait) return IBRH_ERROR_INVALID_ARGUMENT;
+                wait = &candidate;
+            }
+        }
+        if (!wait || !wait->native_handle)
+            return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
+                        "Lotus external input requires one D3D12 wait fence");
+        HANDLE texture_copy = nullptr;
+        HANDLE fence_copy = nullptr;
+        const HANDLE process = GetCurrentProcess();
+        if (!DuplicateHandle(process, reinterpret_cast<HANDLE>(input.native_handle),
+                             process, &texture_copy, 0, FALSE,
+                             DUPLICATE_SAME_ACCESS) ||
+            !DuplicateHandle(process, reinterpret_cast<HANDLE>(wait->native_handle),
+                             process, &fence_copy, 0, FALSE,
+                             DUPLICATE_SAME_ACCESS)) {
+            if (texture_copy) CloseHandle(texture_copy);
+            if (fence_copy) CloseHandle(fence_copy);
+            return IBRH_ERROR_INVALID_ARGUMENT;
+        }
+        uint32_t admitted = model->gpu_admissions->load();
+        while (admitted < 3u &&
+               !model->gpu_admissions->compare_exchange_weak(
+                   admitted, admitted + 1u)) {}
+        if (admitted >= 3u) {
+            CloseHandle(texture_copy);
+            CloseHandle(fence_copy);
+            return IBRH_ERROR_INVALID_STATE;
+        }
+        auto* job = new (std::nothrow) ibrh_job();
+        if (!job) {
+            model->gpu_admissions->fetch_sub(1u);
+            CloseHandle(texture_copy);
+            CloseHandle(fence_copy);
+            return IBRH_ERROR_INTERNAL;
+        }
+        try {
+            job->gpu_admission = std::make_shared<LotusGpuAdmission>(
+                model->gpu_admissions);
+        } catch (...) {
+            model->gpu_admissions->fetch_sub(1u);
+            delete job;
+            CloseHandle(texture_copy);
+            CloseHandle(fence_copy);
+            return IBRH_ERROR_INTERNAL;
+        }
+        job->input_texture_handle = reinterpret_cast<uintptr_t>(texture_copy);
+        job->input_fence_handle = reinterpret_cast<uintptr_t>(fence_copy);
+        job->input_fence_value = wait->value;
+        job->source_frame_id = request->source_frame_id;
+        job->timestamp_ns = request->timestamp_ns;
+        job->width = input.width;
+        job->height = input.height;
+        job->seed = seed;
+        job->rgba = false;
+        job->gpu_state.store(IBRH_JOB_QUEUED);
+        try {
+            job->gpu_worker = model->gpu_worker;
+            model->gpu_worker->enqueue(job);
+        } catch (...) {
+            delete job;
+            return IBRH_ERROR_INTERNAL;
+        }
+        *output = job;
+        return IBRH_OK;
+    }
+#endif
+    if (request->synchronization_count != 0u)
+        return fail(model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
+                    "Lotus host harness does not accept external synchronization");
     if (input.domain != IBRH_RESOURCE_DOMAIN_HOST ||
         input.kind != IBRH_RESOURCE_KIND_IMAGE_2D ||
         input.native_handle_type != IBRH_NATIVE_HANDLE_HOST_POINTER ||
@@ -261,17 +618,6 @@ ibrh_result IBRH_CALL submit(
             model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
             "Lotus harness requires a valid host BGRA8 image");
     }
-    uint64_t seed =
-        request->source_frame_id != 0u ? request->source_frame_id :
-        request->timestamp_ns != 0u ? request->timestamp_ns :
-        model->next_seed.fetch_add(1u);
-    const std::string submit_parameters =
-        copy_string(request->parameters_json);
-    if (submit_parameters.find("\"Seed\"") != std::string::npos &&
-        !json_uint64(submit_parameters, "Seed", seed))
-        return fail(
-            model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-            "Lotus Seed must be an unsigned integer");
     auto* job = new (std::nothrow) ibrh_job();
     if (job == nullptr) return IBRH_ERROR_INTERNAL;
     job->source_frame_id = request->source_frame_id;
@@ -315,6 +661,24 @@ ibrh_result IBRH_CALL job_poll(
     if (status_size < sizeof(*status)) return IBRH_ERROR_STRUCT_TOO_SMALL;
     *status = {};
     status->struct_size = sizeof(*status);
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+    if (job->gpu_admission) {
+        std::shared_ptr<lotus_native::ExternalJob> gpu_job;
+        {
+            std::lock_guard<std::mutex> lock(job->gpu_mutex);
+            gpu_job = job->gpu_job;
+        }
+        if (!gpu_job) status->state = job->gpu_state.load();
+        else switch (gpu_job->state()) {
+            case lotus_native::ExternalJobState::running:
+                status->state = IBRH_JOB_RUNNING; break;
+            case lotus_native::ExternalJobState::complete:
+                status->state = IBRH_JOB_COMPLETE; break;
+            case lotus_native::ExternalJobState::cancelled:
+                status->state = IBRH_JOB_CANCELLED; break;
+        }
+    } else
+#endif
     status->state = IBRH_JOB_COMPLETE;
     status->output_count = 1u;
     status->source_frame_id = job->source_frame_id;
@@ -322,8 +686,27 @@ ibrh_result IBRH_CALL job_poll(
 }
 
 ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
-    return job == nullptr ?
-        IBRH_ERROR_INVALID_ARGUMENT : IBRH_ERROR_INVALID_STATE;
+    if (!job) return IBRH_ERROR_INVALID_ARGUMENT;
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+    job->cancel_requested.store(true);
+    if (auto worker = job->gpu_worker.lock();
+        worker && worker->cancel_queued(job)) return IBRH_OK;
+    std::shared_ptr<lotus_native::ExternalJob> gpu_job;
+    {
+        std::lock_guard<std::mutex> lock(job->gpu_mutex);
+        gpu_job = job->gpu_job;
+    }
+    if (gpu_job) {
+        gpu_job->cancel();
+        job->gpu_state.store(IBRH_JOB_CANCELLED);
+        return IBRH_OK;
+    }
+    if (job->gpu_admission) {
+        job->gpu_state.store(IBRH_JOB_CANCELLED);
+        return IBRH_OK;
+    }
+#endif
+    return IBRH_ERROR_INVALID_STATE;
 }
 
 void IBRH_CALL job_release(ibrh_job* job) {
@@ -341,6 +724,57 @@ ibrh_result IBRH_CALL output_acquire(
     if (output_index != 0u) return IBRH_ERROR_NOT_FOUND;
     auto* lease = new (std::nothrow) ibrh_output_lease();
     if (lease == nullptr) return IBRH_ERROR_INTERNAL;
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+    if (job->gpu_admission) {
+        std::shared_ptr<lotus_native::ExternalJob> gpu_job;
+        {
+            std::lock_guard<std::mutex> lock(job->gpu_mutex);
+            gpu_job = job->gpu_job;
+        }
+        if (!gpu_job) {
+            delete lease;
+            const uint32_t state = job->gpu_state.load();
+            if (state == IBRH_JOB_CANCELLED) return IBRH_ERROR_CANCELLED;
+            if (state == IBRH_JOB_FAILED) return IBRH_ERROR_INTERNAL;
+            return IBRH_ERROR_INVALID_STATE;
+        }
+        lotus_native::ExternalTextureOutput native{};
+        try { native = gpu_job->output(); }
+        catch (...) { delete lease; return IBRH_ERROR_CANCELLED; }
+        lease->gpu_job = std::move(gpu_job);
+        lease->gpu_admission = job->gpu_admission;
+        *descriptor = {};
+        descriptor->struct_size = sizeof(*descriptor);
+        descriptor->api_version = IBRH_CURRENT_API_VERSION;
+        descriptor->output_index = output_index;
+        descriptor->payload_type = IBRH_PIXEL_DEPTH_FLOAT32;
+        descriptor->source_frame_id = native.source_frame_id;
+        descriptor->timestamp_ns = native.timestamp_ns;
+        descriptor->resource.struct_size = sizeof(descriptor->resource);
+        descriptor->resource.api_version = IBRH_CURRENT_API_VERSION;
+        descriptor->resource.domain = IBRH_RESOURCE_DOMAIN_D3D12;
+        descriptor->resource.kind = IBRH_RESOURCE_KIND_IMAGE_2D;
+        descriptor->resource.access = IBRH_RESOURCE_ACCESS_READ;
+        descriptor->resource.pixel_format = IBRH_PIXEL_DEPTH_FLOAT32;
+        descriptor->resource.width = native.width;
+        descriptor->resource.height = native.height;
+        descriptor->resource.depth = 1u;
+        descriptor->resource.row_stride_bytes = native.width * sizeof(float);
+        descriptor->resource.byte_size =
+            static_cast<uint64_t>(native.width) * native.height * sizeof(float);
+        descriptor->resource.native_handle_type = IBRH_NATIVE_HANDLE_WIN32_SHARED;
+        descriptor->resource.native_handle = native.shared_texture_handle;
+        descriptor->ready.struct_size = sizeof(descriptor->ready);
+        descriptor->ready.api_version = IBRH_CURRENT_API_VERSION;
+        descriptor->ready.kind = IBRH_SYNC_D3D12_FENCE;
+        descriptor->ready.operation = IBRH_SYNC_WAIT;
+        descriptor->ready.native_handle_type = IBRH_NATIVE_HANDLE_WIN32_SHARED;
+        descriptor->ready.native_handle = native.ready_fence_handle;
+        descriptor->ready.value = native.ready_fence_value;
+        *output = lease;
+        return IBRH_OK;
+    }
+#endif
     retain_job(job);
     lease->job = job;
     *descriptor = {};
@@ -371,6 +805,10 @@ ibrh_result IBRH_CALL output_acquire(
 
 void IBRH_CALL output_release(ibrh_output_lease* lease) {
     if (lease == nullptr) return;
+#if defined(LOTUS_WITH_VULKAN) && defined(_WIN32)
+    lease->gpu_job.reset();
+    lease->gpu_admission.reset();
+#endif
     release_job(lease->job);
     delete lease;
 }
@@ -415,3 +853,5 @@ extern "C" IBRH_API ibrh_result IBRH_CALL ibrh_get_api(
     api->get_last_error = get_last_error;
     return IBRH_OK;
 }
+#include <deque>
+#include <memory>

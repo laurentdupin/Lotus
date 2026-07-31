@@ -59,7 +59,8 @@ if(LOTUS_WITH_VULKAN)
             project_tokens_half relu softmax_lastdim softmax_lastdim_half
             group_norm group_norm_silu silu nearest concatenate add_channel nchw_tokens
             geglu attention_scores attention_values preprocess_rgb
-            posterior_sample scale_values depth_output)
+            preprocess_texture seeded_noise posterior_sample scale_values
+            depth_output depth_range normalize_depth depth_to_image)
         lotus_compile_shader(${SHADER})
     endforeach()
 endif()
@@ -89,6 +90,7 @@ set_target_properties(lotus_model PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(lotus_native SHARED
     src/lotus.cpp
+    src/external_gpu.cpp
     src/inferbridge_harness.cpp)
 target_compile_definitions(
     lotus_native PRIVATE
@@ -96,6 +98,9 @@ target_compile_definitions(
         INFERBRIDGE_HARNESS_BUILDING_LIBRARY)
 target_include_directories(lotus_native PUBLIC include)
 target_link_libraries(lotus_native PRIVATE lotus_model)
+if(WIN32 AND LOTUS_WITH_VULKAN)
+    target_link_libraries(lotus_native PRIVATE d3d12 dxgi)
+endif()
 set_target_properties(
     lotus_native PROPERTIES
     OUTPUT_NAME "lotus_native"

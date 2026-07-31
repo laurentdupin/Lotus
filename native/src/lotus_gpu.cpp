@@ -108,32 +108,49 @@ public:
                 std::uint64_t(width) * height * 3 * sizeof(float)),
             3, height, width};
         operators_.preprocess_rgb(image.buffer, host_rgb, width, height);
-        GpuImage posterior = vae_encode(std::move(image));
+        VulkanBuffer initial_buffer =
+            context_.create_device_buffer(latent_count * sizeof(float));
         VulkanBuffer posterior_noise_buffer =
             context_.create_device_buffer(latent_count * sizeof(float));
         context_.upload(
+            initial_buffer, initial_noise, latent_count * sizeof(float));
+        context_.upload(
             posterior_noise_buffer, posterior_noise,
             latent_count * sizeof(float));
+        return run_device(
+            std::move(image.buffer), width, height,
+            std::move(initial_buffer), std::move(posterior_noise_buffer));
+    }
+
+    GpuImage run_device(
+        VulkanBuffer normalized_rgb,
+        std::uint32_t width, std::uint32_t height,
+        VulkanBuffer initial_noise, VulkanBuffer posterior_noise) {
+        winograd_selected_ = true;
+        winograd_enabled_ = false;
+        const std::uint32_t latent_width = width / 8;
+        const std::uint32_t latent_height = height / 8;
+        const std::uint32_t latent_count =
+            4 * latent_width * latent_height;
+        GpuImage image{
+            std::move(normalized_rgb), 3, height, width};
+        GpuImage posterior = vae_encode(std::move(image));
         GpuImage rgb_latent{
             context_.create_device_buffer(latent_count * sizeof(float)),
             4, latent_height, latent_width};
         operators_.posterior_sample(
             rgb_latent.buffer, posterior.buffer,
-            posterior_noise_buffer, latent_count);
+            posterior_noise, latent_count);
         const std::uint32_t input_channels = static_cast<std::uint32_t>(
             tensor(unet_, "conv_in.weight").dimensions[1]);
         GpuImage sample;
         if (input_channels == 8) {
-            VulkanBuffer initial_buffer =
-                context_.create_device_buffer(latent_count * sizeof(float));
-            context_.upload(
-                initial_buffer, initial_noise, latent_count * sizeof(float));
             sample = {
                 context_.create_device_buffer(
                     std::uint64_t(latent_count) * 2 * sizeof(float)),
                 8, latent_height, latent_width};
             operators_.concatenate(
-                sample.buffer, rgb_latent.buffer, initial_buffer,
+                sample.buffer, rgb_latent.buffer, initial_noise,
                 latent_count, latent_count);
         } else if (input_channels == 4) {
             sample = std::move(rgb_latent);
@@ -759,6 +776,43 @@ private:
     VulkanBuffer zero_bias_;
     GpuTokens prompt_;
 };
+}
+
+struct LotusGpuGraph::Impl {
+    Impl(
+        VulkanContext& context, GpuModel& unet, GpuModel& vae,
+        VulkanOperators& operators, const TokenTensor& prompt)
+        : context(context), operators(operators),
+          graph(context, unet, vae, operators, prompt) {}
+    VulkanContext& context;
+    VulkanOperators& operators;
+    Graph graph;
+};
+
+LotusGpuGraph::LotusGpuGraph(
+    VulkanContext& context, GpuModel& unet, GpuModel& vae,
+    VulkanOperators& operators, const TokenTensor& prompt)
+    : impl_(std::make_unique<Impl>(
+          context, unet, vae, operators, prompt)) {}
+
+LotusGpuGraph::~LotusGpuGraph() = default;
+
+VulkanBuffer LotusGpuGraph::infer_device(
+    VulkanBuffer normalized_rgb,
+    std::uint32_t processing_width, std::uint32_t processing_height,
+    VulkanBuffer initial_noise, VulkanBuffer posterior_noise,
+    std::uint32_t output_width, std::uint32_t output_height) {
+    GpuImage decoded = impl_->graph.run_device(
+        std::move(normalized_rgb), processing_width, processing_height,
+        std::move(initial_noise), std::move(posterior_noise));
+    VulkanBuffer depth = impl_->context.create_device_buffer(
+        std::uint64_t(output_width) * output_height * sizeof(float));
+    impl_->operators.depth_output(
+        depth, decoded.buffer, decoded.width, decoded.height,
+        output_width, output_height);
+    impl_->operators.normalize_depth(
+        depth, output_width * output_height);
+    return depth;
 }
 
 VulkanBuffer lotus_infer_gpu(

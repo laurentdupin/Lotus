@@ -5,6 +5,7 @@
 #include "prompt_cache.h"
 
 #include <string>
+#include <memory>
 
 namespace lotus_native {
 
@@ -13,6 +14,26 @@ struct GpuImage {
     std::uint32_t channels = 0;
     std::uint32_t height = 0;
     std::uint32_t width = 0;
+};
+
+class LotusGpuGraph {
+public:
+    LotusGpuGraph(
+        VulkanContext& context, GpuModel& unet, GpuModel& vae,
+        VulkanOperators& operators, const TokenTensor& prompt);
+    ~LotusGpuGraph();
+    LotusGpuGraph(const LotusGpuGraph&) = delete;
+    LotusGpuGraph& operator=(const LotusGpuGraph&) = delete;
+
+    VulkanBuffer infer_device(
+        VulkanBuffer normalized_rgb,
+        std::uint32_t processing_width, std::uint32_t processing_height,
+        VulkanBuffer initial_noise, VulkanBuffer posterior_noise,
+        std::uint32_t output_width, std::uint32_t output_height);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 VulkanBuffer lotus_infer_gpu(

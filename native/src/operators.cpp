@@ -48,9 +48,14 @@
 #include "attention_scores_spv.h"
 #include "attention_values_spv.h"
 #include "preprocess_rgb_spv.h"
+#include "preprocess_texture_spv.h"
+#include "seeded_noise_spv.h"
 #include "posterior_sample_spv.h"
 #include "scale_values_spv.h"
 #include "depth_output_spv.h"
+#include "depth_range_spv.h"
+#include "normalize_depth_spv.h"
+#include "depth_to_image_spv.h"
 
 #include <limits>
 #include <stdexcept>
@@ -276,13 +281,28 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           lotus_attention_values_spv_size, 3, 16)),
       preprocess_rgb_(context.create_pipeline(
           lotus_preprocess_rgb_spv, lotus_preprocess_rgb_spv_size, 2, 8)),
+      preprocess_texture_(context.create_pipeline(
+          lotus_preprocess_texture_spv, lotus_preprocess_texture_spv_size,
+          {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+           VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}, 16)),
+      seeded_noise_(context.create_pipeline(
+          lotus_seeded_noise_spv, lotus_seeded_noise_spv_size, 2, 12)),
       posterior_sample_(context.create_pipeline(
           lotus_posterior_sample_spv,
           lotus_posterior_sample_spv_size, 3, 4)),
       scale_values_(context.create_pipeline(
           lotus_scale_values_spv, lotus_scale_values_spv_size, 1, 8)),
       depth_output_(context.create_pipeline(
-          lotus_depth_output_spv, lotus_depth_output_spv_size, 2, 16)) {
+          lotus_depth_output_spv, lotus_depth_output_spv_size, 2, 16)),
+      depth_range_(context.create_pipeline(
+          lotus_depth_range_spv, lotus_depth_range_spv_size, 2, 4)),
+      normalize_depth_(context.create_pipeline(
+          lotus_normalize_depth_spv,
+          lotus_normalize_depth_spv_size, 2, 4)),
+      depth_to_image_(context.create_pipeline(
+          lotus_depth_to_image_spv, lotus_depth_to_image_spv_size,
+          {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+           VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}, 8)) {
     linear_.set_debug_name("linear");
     linear16_.set_debug_name("linear16");
     linear_half_.set_debug_name("linear_half");
@@ -340,9 +360,14 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     attention_scores_.set_debug_name("attention_scores");
     attention_values_.set_debug_name("attention_values");
     preprocess_rgb_.set_debug_name("preprocess_rgb");
+    preprocess_texture_.set_debug_name("preprocess_texture");
+    seeded_noise_.set_debug_name("seeded_noise");
     posterior_sample_.set_debug_name("posterior_sample");
     scale_values_.set_debug_name("scale_values");
     depth_output_.set_debug_name("depth_output");
+    depth_range_.set_debug_name("depth_range");
+    normalize_depth_.set_debug_name("normalize_depth");
+    depth_to_image_.set_debug_name("depth_to_image");
 }
 
 void VulkanOperators::linear(
@@ -1255,6 +1280,36 @@ void VulkanOperators::preprocess_rgb(
         divide_up(static_cast<std::uint32_t>(count), 256));
 }
 
+void VulkanOperators::preprocess_texture(
+    VulkanBuffer& output, const VulkanImage& input,
+    std::uint32_t source_width, std::uint32_t source_height,
+    std::uint32_t target_width, std::uint32_t target_height) {
+    require_bytes(
+        output, std::uint64_t(target_width) * target_height * 3,
+        "texture preprocessing output");
+    struct Parameters {
+        std::uint32_t source_width, source_height, target_width, target_height;
+    } parameters{source_width, source_height, target_width, target_height};
+    context_.dispatch_image_to_buffer(
+        preprocess_texture_, input, output, &parameters, sizeof(parameters),
+        divide_up(target_width, 16), divide_up(target_height, 16));
+}
+
+void VulkanOperators::seeded_noise(
+    VulkanBuffer& initial, VulkanBuffer& posterior,
+    std::uint32_t count, std::uint64_t seed) {
+    require_bytes(initial, count, "initial noise");
+    require_bytes(posterior, count, "posterior noise");
+    struct Parameters {
+        std::uint32_t count, seed_low, seed_high;
+    } parameters{
+        count, static_cast<std::uint32_t>(seed),
+        static_cast<std::uint32_t>(seed >> 32u)};
+    context_.dispatch(
+        seeded_noise_, {&initial, &posterior},
+        &parameters, sizeof(parameters), divide_up(count, 256));
+}
+
 void VulkanOperators::posterior_sample(
     VulkanBuffer& output, const VulkanBuffer& posterior,
     const VulkanBuffer& noise, std::uint32_t count) {
@@ -1294,6 +1349,27 @@ void VulkanOperators::depth_output(
     context_.dispatch(
         depth_output_, {&output, &decoded}, &parameters, sizeof(parameters),
         divide_up(target_width * target_height, 256));
+}
+
+void VulkanOperators::normalize_depth(
+    VulkanBuffer& depth, std::uint32_t count) {
+    require_bytes(depth, count, "depth normalization input");
+    VulkanBuffer range = context_.create_device_buffer(2 * sizeof(float));
+    context_.dispatch(
+        depth_range_, {&depth, &range}, &count, sizeof(count), 1);
+    context_.dispatch(
+        normalize_depth_, {&depth, &range}, &count, sizeof(count),
+        divide_up(count, 256));
+}
+
+void VulkanOperators::depth_to_image(
+    VulkanImage& output, const VulkanBuffer& depth,
+    std::uint32_t width, std::uint32_t height) {
+    require_bytes(depth, std::uint64_t(width) * height, "depth image input");
+    struct Parameters { std::uint32_t width, height; } parameters{width, height};
+    context_.dispatch_buffer_to_image(
+        depth_to_image_, depth, output, &parameters, sizeof(parameters),
+        divide_up(width, 16), divide_up(height, 16));
 }
 
 }  // namespace lotus_native
