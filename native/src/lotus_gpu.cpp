@@ -43,6 +43,28 @@ public:
                 prompt_.buffer, prompt.values.data(),
                 prompt.values.size() * sizeof(float));
         }
+        std::vector<float> timestep_values(320);
+        for (std::uint32_t i = 0; i < 160; ++i) {
+            const float frequency = std::exp(
+                -std::log(10000.0f) * static_cast<float>(i) / 160.0f);
+            timestep_values[i] = std::cos(999.0f * frequency);
+            timestep_values[160 + i] = std::sin(999.0f * frequency);
+        }
+        timestep_.tokens = 1;
+        timestep_.dimensions = 320;
+        timestep_.buffer = context_.create_device_buffer(
+            timestep_values.size() * sizeof(float));
+        context_.upload(
+            timestep_.buffer, timestep_values.data(),
+            timestep_values.size() * sizeof(float));
+        const std::vector<float> task{
+            std::sin(1.0f), 0.0f, std::cos(1.0f), 1.0f};
+        labels_.tokens = 1;
+        labels_.dimensions = 4;
+        labels_.buffer = context_.create_device_buffer(
+            task.size() * sizeof(float));
+        context_.upload(
+            labels_.buffer, task.data(), task.size() * sizeof(float));
     }
 
     GpuImage run(
@@ -557,26 +579,17 @@ private:
     }
 
     GpuTokens time_embedding() {
-        std::vector<float> values(320);
-        for (std::uint32_t i = 0; i < 160; ++i) {
-            const float frequency = std::exp(
-                -std::log(10000.0f) * static_cast<float>(i) / 160.0f);
-            values[i] = std::cos(999.0f * frequency);
-            values[160 + i] = std::sin(999.0f * frequency);
-        }
         GpuTokens timestep{
-            context_.create_device_buffer(values.size() * sizeof(float)),
+            context_.create_device_buffer(320 * sizeof(float)),
             1, 320};
-        context_.upload(
-            timestep.buffer, values.data(), values.size() * sizeof(float));
+        context_.copy(
+            timestep.buffer, 0, timestep_.buffer, 0, 320 * sizeof(float));
         GpuTokens time = embedding_mlp(
             std::move(timestep), "time_embedding");
-        const std::vector<float> task{
-            std::sin(1.0f), 0.0f, std::cos(1.0f), 1.0f};
         GpuTokens labels{
-            context_.create_device_buffer(task.size() * sizeof(float)), 1, 4};
-        context_.upload(
-            labels.buffer, task.data(), task.size() * sizeof(float));
+            context_.create_device_buffer(4 * sizeof(float)), 1, 4};
+        context_.copy(
+            labels.buffer, 0, labels_.buffer, 0, 4 * sizeof(float));
         GpuTokens classes = embedding_mlp(
             std::move(labels), "class_embedding");
         add_tokens(time, classes);
@@ -775,6 +788,8 @@ private:
     VulkanOperators& operators_;
     VulkanBuffer zero_bias_;
     GpuTokens prompt_;
+    GpuTokens timestep_;
+    GpuTokens labels_;
 };
 }
 

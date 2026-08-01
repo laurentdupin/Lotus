@@ -30,6 +30,8 @@ enum {
 
 LOTUS_API uint32_t lotus_native_abi_version(void);
 LOTUS_API const char* lotus_last_error(void);
+LOTUS_API int lotus_get_transfer_counters(
+    uint64_t* upload_bytes, uint64_t* download_bytes);
 
 LOTUS_API int lotus_create(
     const char* snapshot_root_utf8,

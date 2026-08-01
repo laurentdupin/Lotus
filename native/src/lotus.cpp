@@ -231,6 +231,19 @@ void resize_and_normalize(
 
 }  // namespace
 
+int lotus_get_transfer_counters(
+    uint64_t* upload_bytes, uint64_t* download_bytes) {
+    if (!upload_bytes || !download_bytes)
+        return fail(LOTUS_INVALID_ARGUMENT, "invalid transfer counter output");
+#if defined(LOTUS_WITH_VULKAN)
+    lotus_native::global_transfer_counters(*upload_bytes, *download_bytes);
+#else
+    *upload_bytes = 0u;
+    *download_bytes = 0u;
+#endif
+    return LOTUS_OK;
+}
+
 extern "C" {
 
 std::uint32_t lotus_native_abi_version(void) {

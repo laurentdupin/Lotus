@@ -114,11 +114,14 @@ class ExternalJobImpl final : public ExternalJob {
 public:
     ExternalJobImpl(
         std::shared_ptr<ExternalGpu> owner, VulkanImage input,
-        VulkanImage output, VulkanSubmission submission)
+        VulkanImage output, VulkanSubmission submission,
+        std::shared_ptr<std::mutex> record_mutex)
         : owner_(std::move(owner)), input_(std::move(input)),
-          output_(std::move(output)), submission_(std::move(submission)) {}
+          output_(std::move(output)), submission_(std::move(submission)),
+          record_mutex_(std::move(record_mutex)) {}
     ~ExternalJobImpl() override {
         try { submission_.wait(); } catch (...) {}
+        std::lock_guard<std::mutex> lock(*record_mutex_);
         submission_ = {};
         output_ = {};
         input_ = {};
@@ -136,6 +139,7 @@ private:
     VulkanImage input_;
     VulkanImage output_;
     mutable VulkanSubmission submission_;
+    std::shared_ptr<std::mutex> record_mutex_;
     std::atomic<bool> cancelled_{false};
     mutable std::atomic<bool> complete_{false};
 };
@@ -188,7 +192,7 @@ public:
         validate_input(d3d12_.Get(), request);
         validate_output(d3d12_.Get(), request);
         try {
-            std::lock_guard<std::mutex> lock(record_mutex_);
+            std::lock_guard<std::mutex> lock(*record_mutex_);
             std::uint32_t processing_width = 0u;
             std::uint32_t processing_height = 0u;
             inferbridge_shape(request.width, request.height,
@@ -214,15 +218,17 @@ public:
             VulkanSemaphore signal = context_.import_d3d12_fence(
                 reinterpret_cast<void*>(request.signal_fence_handle),
                 request.signal_fence_value);
-            VulkanSubmission submission = context_.batch_async(
-                std::move(wait), std::move(signal), [&] {
+            VulkanBuffer rgb;
+            VulkanBuffer initial;
+            VulkanBuffer posterior;
+            VulkanSubmission preprocessing;
+            try {
+                preprocessing = context_.batch_async(
+                    std::move(wait), {}, [&] {
                     context_.acquire_external_image(
                         input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_ACCESS_SHADER_READ_BIT);
-                    context_.acquire_external_image(
-                        output, VK_IMAGE_LAYOUT_GENERAL,
-                        VK_ACCESS_SHADER_WRITE_BIT);
-                    VulkanBuffer rgb = context_.create_device_buffer(
+                    rgb = context_.create_device_buffer(
                         std::uint64_t(processing_width) * processing_height *
                         3 * sizeof(float));
                     operators_.preprocess_texture(
@@ -231,28 +237,59 @@ public:
                     const std::uint32_t noise_count =
                         4u * (processing_width / 8u) *
                         (processing_height / 8u);
-                    VulkanBuffer initial = context_.create_device_buffer(
+                    initial = context_.create_device_buffer(
                         std::uint64_t(noise_count) * sizeof(float));
-                    VulkanBuffer posterior = context_.create_device_buffer(
+                    posterior = context_.create_device_buffer(
                         std::uint64_t(noise_count) * sizeof(float));
                     operators_.seeded_noise(
                         initial, posterior, noise_count, request.seed);
-                    VulkanBuffer depth = graph_.infer_device(
-                        std::move(rgb), processing_width, processing_height,
-                        std::move(initial), std::move(posterior),
-                        request.width, request.height);
-                    operators_.depth_to_image(
-                        output, depth, request.width, request.height);
                     context_.release_external_image(
                         input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_ACCESS_SHADER_READ_BIT);
+                    });
+                preprocessing.wait();
+                preprocessing = {};
+            } catch (const std::exception& error) {
+                throw std::runtime_error(
+                    std::string("Lotus preprocess/noise stage failed: ") +
+                    error.what());
+            }
+            // The graph's existing bounded batches recycle intermediates at
+            // each completed operator group. Waiting here occurs only on the
+            // harness worker: public submit remains asynchronous and all
+            // tensors remain device-resident.
+            VulkanBuffer depth;
+            try {
+                depth = graph_.infer_device(
+                    std::move(rgb), processing_width, processing_height,
+                    std::move(initial), std::move(posterior),
+                    request.width, request.height);
+            } catch (const std::exception& error) {
+                throw std::runtime_error(
+                    std::string("Lotus bounded diffusion/VAE stage failed: ") +
+                    error.what());
+            }
+            VulkanSubmission submission;
+            try {
+                submission = context_.batch_async(
+                    {}, std::move(signal), [&] {
+                    context_.acquire_external_image(
+                        output, VK_IMAGE_LAYOUT_GENERAL,
+                        VK_ACCESS_SHADER_WRITE_BIT);
+                    operators_.depth_to_image(
+                        output, depth, request.width, request.height);
                     context_.release_external_image(
                         output, VK_IMAGE_LAYOUT_GENERAL,
                         VK_ACCESS_SHADER_WRITE_BIT);
-                });
+                    });
+            } catch (const std::exception& error) {
+                throw std::runtime_error(
+                    std::string("Lotus final R32 output stage failed: ") +
+                    error.what());
+            }
             return std::make_shared<ExternalJobImpl>(
                 shared_from_this(), std::move(input), std::move(output),
-                std::move(submission));
+                std::move(submission), record_mutex_);
         } catch (...) {
             throw;
         }
@@ -275,7 +312,7 @@ private:
     LotusGpuGraph graph_;
 #if defined(_WIN32)
     ComPtr<ID3D12Device> d3d12_;
-    std::mutex record_mutex_;
+    std::shared_ptr<std::mutex> record_mutex_ = std::make_shared<std::mutex>();
 #endif
 };
 

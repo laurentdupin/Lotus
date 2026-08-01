@@ -140,6 +140,14 @@ target_link_libraries(lotus_harness_abi_smoke PRIVATE lotus_native)
 add_executable(lotus_harness_full_graph tests/harness_full_graph.cpp)
 target_include_directories(lotus_harness_full_graph PRIVATE include)
 target_link_libraries(lotus_harness_full_graph PRIVATE lotus_native)
+if(WIN32 AND LOTUS_WITH_VULKAN)
+    add_executable(
+        lotus_d3d12_abi2_full_graph tests/d3d12_abi2_full_graph.cpp)
+    target_include_directories(
+        lotus_d3d12_abi2_full_graph PRIVATE include)
+    target_link_libraries(
+        lotus_d3d12_abi2_full_graph PRIVATE lotus_native d3d12 dxgi)
+endif()
 
 enable_testing()
 add_test(NAME lotus_model_probe_usage COMMAND lotus_model_probe)

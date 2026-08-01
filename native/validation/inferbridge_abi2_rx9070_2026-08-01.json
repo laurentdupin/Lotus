@@ -1,0 +1,45 @@
+{
+  "date": "2026-08-01",
+  "adapter": {
+    "name": "AMD Radeon RX 9070",
+    "luid": "8ea8010000000000"
+  },
+  "contract": "InferBridge harness ABI 2.0 Core-owned D3D12/Vulkan transfers",
+  "dll": {
+    "relativePath": "native/out/foundation/Release/lotus_native.dll",
+    "sha256": "d9f3934a25ad64c7f3f8771c121dead220c9288a6e0f037d99e4ec57e199a393",
+    "bytes": 838144
+  },
+  "variants": [
+    {
+      "id": "generation",
+      "snapshotRevision": "d8f1b0835745cb1ef5c8b89528c8d37bc764a37b",
+      "relativeL1": 0.000950690,
+      "maximumAbsolute": 0.00248301,
+      "maximumSubmitReturnMs": 0.0082,
+      "uploadByteDelta": 0,
+      "downloadByteDelta": 0,
+      "sourceFrameId": 7007
+    },
+    {
+      "id": "regression",
+      "snapshotRevision": "9b858ffdbec93117d50de899e8bccf64345d8f3b",
+      "relativeL1": 0.000628796,
+      "maximumAbsolute": 0.00156927,
+      "maximumSubmitReturnMs": 0.0064,
+      "uploadByteDelta": 0,
+      "downloadByteDelta": 0,
+      "sourceFrameId": 7007
+    }
+  ],
+  "checks": {
+    "exactAdapterLuid": true,
+    "coreOwnedInputOutput": true,
+    "explicitWaitSignalFences": true,
+    "gpuSeedGeneration": true,
+    "finiteVaryingR32Output": true,
+    "sourceFrameCorrelation": true,
+    "zeroHostTransfers": true,
+    "queueWideIdleCalls": 0
+  }
+}

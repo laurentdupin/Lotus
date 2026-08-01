@@ -151,11 +151,12 @@ validated tensor path plus final normalization.
 
 ## Embedded InferBridge harness
 
-The model DLL exports `ibrh_get_api` for InferBridge harness ABI 1.0. It
-accepts one host-memory BGRA8 image and returns one leased host-memory,
-source-size normalized FP32 depth image. The harness preserves
-`source_frame_id` and timestamp, and the output lease retains its storage
-after job release.
+The model DLL exports `ibrh_get_api` for InferBridge harness ABI 2.0. In
+addition to the host-memory compatibility path, it consumes Core-owned shared
+D3D12 BGRA8/RGBA8 input textures and wait fences and writes source-sized
+normalized depth directly to a Core-owned shared D3D12 R32_FLOAT texture. Core
+owns transfer resources and output leases; the harness borrows the handles for
+the job lifetime.
 
 `model_path` is the canonical generation or regression snapshot selected for
 the single Lotus model entry. `PromptCache` in the model parameters names the
@@ -171,14 +172,24 @@ a per-model sequence. Exact numerical validation continues to use the
 explicit-noise ABI, which removes RNG-algorithm ambiguity and validates the
 actual graph.
 
-Capability probing is conservative: host input/output and one synchronous
-in-flight job are advertised. The selected Vulkan device executes the neural
-graph, while capture upload and depth readback remain host boundaries.
-External GPU resources, asynchronous completion, and cancellation are not
-advertised.
+The external path imports the exact requested adapter LUID, preprocesses the
+texture and generates seeded noise on Vulkan, executes the graph in bounded
+device-only stages, and signals only the supplied final fence. Its persistent
+worker makes public submission asynchronous and admits at most three jobs.
+Prompt, timestep, and class constants are uploaded once during model load;
+per-frame transfer counters remain unchanged. It uses no queue-wide idle call
+and never falls back to a host pixel/depth path under the GPU capability.
 
-The Windows Release ABI and full-graph harness tests pass for both the
-generation and regression snapshots on the RX 9070. Each gate covers
-snapshot/prompt binding, a 768x64 BGRA image, normalized output, correlation,
-and output-lease lifetime. The underlying exact-noise image and tensor gates
-remain validated on all three GPUs as reported above.
+The Windows Release ABI2 full-graph gate passes both snapshots on the RX 9070
+with Core-owned input/output resources, explicit fences, source-frame
+correlation, finite varying R32 output, and zero per-frame upload/readback:
+
+| Variant | Relative L1 | Maximum absolute | Submit return | Upload/download delta |
+|---|---:|---:|---:|---:|
+| Generation | `0.000950690` | `0.00248301` | `0.0082 ms` | `0 / 0` bytes |
+| Regression | `0.000628796` | `0.00156927` | `0.0064 ms` | `0 / 0` bytes |
+
+The external 64x64 request deliberately exercises the production 768-pixel
+longest-edge processing shape; each isolated ABI2 job completed in about 21
+seconds on the RX 9070. The bounded staging is a correctness and residency
+gate, not a performance claim.
