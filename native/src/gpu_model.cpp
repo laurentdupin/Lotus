@@ -1,4 +1,5 @@
 #include "gpu_model.h"
+#include "inferbridge/native_harness_precision.h"
 
 #include <array>
 #include <cstring>
@@ -64,6 +65,14 @@ std::uint16_t float_to_half(float input) {
 
 GpuModel::GpuModel(const SafeTensors& model, VulkanContext& context)
     : context_(context) {
+    precision_ = inferbridge::native::require_supported_precision(
+        inferbridge::native::requested_precision(),
+        {context.subgroup_size() == 32u,
+         context.supports_packed_int8_dot()},
+        context.subgroup_size() == 32u
+            ? inferbridge::native::Precision::fp16
+            : inferbridge::native::Precision::fp32);
+    const bool half_weights = precision_ == inferbridge::native::Precision::fp16;
     tensors_.reserve(model.tensor_count());
     for (std::string_view name : model.tensor_names()) {
         const TensorView& source = model.tensor(name);
@@ -79,11 +88,28 @@ GpuModel::GpuModel(const SafeTensors& model, VulkanContext& context)
             context.create_device_buffer(bytes),
             {},
             {},
+            {},
+            {},
             source.dimensions,
             source.rank,
             source.elements,
         };
         context.upload(destination.buffer, source.data, bytes);
+        if (precision_ == inferbridge::native::Precision::int8 &&
+            source.rank == 2 && source.dimensions[1] % 4u == 0u) {
+            const auto quantized = inferbridge::native::quantize_int8_rows(
+                static_cast<const float*>(source.data),
+                static_cast<std::size_t>(source.dimensions[0]),
+                static_cast<std::size_t>(source.dimensions[1]));
+            destination.int8_buffer = context.create_device_buffer(
+                quantized.packed.size() * sizeof(std::uint32_t));
+            destination.int8_scales = context.create_device_buffer(
+                quantized.scales.size() * sizeof(float));
+            context.upload(destination.int8_buffer, quantized.packed.data(),
+                quantized.packed.size() * sizeof(std::uint32_t));
+            context.upload(destination.int8_scales, quantized.scales.data(),
+                quantized.scales.size() * sizeof(float));
+        }
         if (context.subgroup_size() == 64 &&
             source.rank == 4 &&
             source.dimensions[2] == 3 &&
@@ -138,7 +164,7 @@ GpuModel::GpuModel(const SafeTensors& model, VulkanContext& context)
                 transformed.data(),
                 transformed.size() * sizeof(float));
         }
-        if (context.subgroup_size() == 32 && source.rank == 2 &&
+        if (half_weights && context.subgroup_size() == 32 && source.rank == 2 &&
             source.dimensions[1] % 4 == 0) {
             const auto* floats =
                 static_cast<const float*>(source.data);
@@ -163,7 +189,7 @@ GpuModel::GpuModel(const SafeTensors& model, VulkanContext& context)
                 packed.data(),
                 packed.size() * sizeof(std::uint32_t));
             context.discard(destination.buffer);
-        } else if (context.subgroup_size() == 32 &&
+        } else if (half_weights && context.subgroup_size() == 32 &&
             source.rank == 4 &&
             source.dimensions[2] == 3 &&
             source.dimensions[3] == 3) {

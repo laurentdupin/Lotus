@@ -65,6 +65,13 @@ if(LOTUS_WITH_VULKAN)
             depth_output depth_range normalize_depth depth_to_image)
         lotus_compile_shader(${SHADER})
     endforeach()
+    foreach(SHARED_SHADER quantize_rows_int8 linear_int8_tiled)
+        inferbridge_compile_native_support_shader(
+            NAME "${SHARED_SHADER}" PREFIX lotus
+            GENERATED_DIR "${LOTUS_GENERATED_DIR}"
+            EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            OUT_VAR LOTUS_SHADER_HEADERS)
+    endforeach()
 endif()
 
 add_library(lotus_model STATIC
