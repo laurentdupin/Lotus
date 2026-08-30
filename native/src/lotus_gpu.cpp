@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -9,6 +11,20 @@
 
 namespace lotus_native {
 namespace {
+
+bool diffusion_profile_enabled() {
+    const char* value = std::getenv("INFERBRIDGE_DIFFUSION_PROFILE");
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
+
+void report_stage(
+    const char* stage, std::chrono::steady_clock::time_point started) {
+    if (!diffusion_profile_enabled()) return;
+    const double milliseconds = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    std::fprintf(stderr, "diffusion-stage lotus %-12s %.3f ms\n",
+                 stage, milliseconds);
+}
 
 struct GpuTokens {
     VulkanBuffer buffer;
@@ -156,7 +172,9 @@ public:
             4 * latent_width * latent_height;
         GpuImage image{
             std::move(normalized_rgb), 3, height, width};
+        auto stage_started = std::chrono::steady_clock::now();
         GpuImage posterior = vae_encode(std::move(image));
+        report_stage("vae-encode", stage_started);
         GpuImage rgb_latent{
             context_.create_device_buffer(latent_count * sizeof(float)),
             4, latent_height, latent_width};
@@ -180,12 +198,17 @@ public:
             throw std::runtime_error(
                 "unsupported Lotus UNet input channels");
         }
+        stage_started = std::chrono::steady_clock::now();
         GpuImage prediction = unet_predict(std::move(sample));
+        report_stage("unet", stage_started);
         operators_.scale_values(
             prediction.buffer,
             static_cast<std::uint32_t>(elements(prediction)),
             1.0f / 0.18215f);
-        return vae_decode(std::move(prediction));
+        stage_started = std::chrono::steady_clock::now();
+        GpuImage decoded = vae_decode(std::move(prediction));
+        report_stage("vae-decode", stage_started);
+        return decoded;
     }
 
     GpuImage test_encode(GpuImage&& image) {

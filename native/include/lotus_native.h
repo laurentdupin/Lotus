@@ -70,8 +70,9 @@ LOTUS_API int lotus_infer_rgb_f32(
  * InferBridge image contract. The source is tightly packed BGRA8. The first
  * three bytes are intentionally retained in BGR order, matching the Python
  * harness. Lotus processes a nearest-neighbour image whose longest edge is
- * 768 pixels, then nearest-resizes and min/max-normalizes the depth back to
- * source dimensions.
+ * 384 pixels by default, then nearest-resizes and min/max-normalizes the
+ * depth back to source dimensions. INFERBRIDGE_DIFFUSION_LONG_EDGE can select
+ * a value from 256 through 1024.
  */
 LOTUS_API int lotus_inferbridge_image_shape(
     uint32_t source_width,

@@ -7,6 +7,7 @@
 #if defined(LOTUS_WITH_VULKAN)
 #include "gpu_model.h"
 #include "lotus_gpu.h"
+#include "inferbridge/native_harness_diffusion_shape.h"
 #include "operators.h"
 #include "vulkan.h"
 #endif
@@ -149,17 +150,8 @@ void inferbridge_shape(
     std::uint32_t height,
     std::uint32_t& processing_width,
     std::uint32_t& processing_height) {
-    if (width == 0 || height == 0) {
-        throw std::invalid_argument("Lotus image dimensions must be non-zero");
-    }
-    constexpr std::uint32_t processing_resolution = 768;
-    const double scale = std::min(
-        static_cast<double>(processing_resolution) / width,
-        static_cast<double>(processing_resolution) / height);
-    processing_width = std::max(
-        1u, static_cast<std::uint32_t>(static_cast<double>(width) * scale));
-    processing_height = std::max(
-        1u, static_cast<std::uint32_t>(static_cast<double>(height) * scale));
+    inferbridge::native_harness::fit_diffusion_shape(
+        width, height, processing_width, processing_height);
 }
 
 std::vector<float> preprocess_bgra(
