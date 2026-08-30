@@ -193,3 +193,26 @@ The external 64x64 request deliberately exercises the production 768-pixel
 longest-edge processing shape; each isolated ABI2 job completed in about 21
 seconds on the RX 9070. The bounded staging is a correctness and residency
 gate, not a performance claim.
+
+## Native Metal executor
+
+The macOS harness now ports the same canonical VAE encoder, posterior sample,
+single-step conditional UNet, and VAE decoder directly to MPSGraph. Both the
+eight-channel generative checkpoint and four-channel discriminative checkpoint
+use the same public ABI and keep learned intermediates on Metal. The port
+preserves the reference's asymmetric VAE downsampling, skip-aligned nearest
+upsampling, group/layer normalization epsilons, single-head VAE attention, and
+multi-head UNet self/cross attention.
+
+| Variant / precision | Full 64x64 relative L1 | Maximum absolute |
+|---|---:|---:|
+| Generation FP32 | `5.16004e-6` | `1.62721e-5` |
+| Regression FP32 | `2.46795e-6` | `1.10269e-5` |
+| Generation FP16 | `0.00338574` | `0.0075831` |
+| Regression FP16 | `0.00449251` | `0.0131227` |
+
+Persistent, model-identity-bound MPSGraph packages remove graph compilation
+from later starts. On the Apple M1 validation machine, warm generation FP32
+and FP16 medians at 64x64 were about 177 ms and 104 ms respectively. A 65x73
+non-multiple tensor input and the real InferBridge host-transfer lifecycle at
+the production diffusion preprocessing shape also passed for both variants.

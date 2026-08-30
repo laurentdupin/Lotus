@@ -15,6 +15,15 @@ endif()
 
 option(LOTUS_WITH_VULKAN
     "Build the dependency-free Vulkan executor" ON)
+option(LOTUS_WITH_METAL
+    "Build the native Metal executor" ${APPLE})
+
+if(LOTUS_WITH_METAL)
+    if(NOT APPLE)
+        message(FATAL_ERROR "LOTUS_WITH_METAL requires Apple platforms")
+    endif()
+    enable_language(OBJCXX)
+endif()
 
 if(LOTUS_WITH_VULKAN)
     find_package(Vulkan REQUIRED COMPONENTS glslc)
@@ -99,8 +108,22 @@ set_target_properties(lotus_model PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(lotus_native SHARED
     src/lotus.cpp
-    src/external_gpu.cpp
     src/inferbridge_harness.cpp)
+if(LOTUS_WITH_VULKAN)
+    target_sources(lotus_native PRIVATE src/external_gpu.cpp)
+else()
+    target_sources(lotus_native PRIVATE src/external_gpu_stub.cpp)
+endif()
+if(LOTUS_WITH_METAL)
+    target_sources(lotus_native PRIVATE src/metal_executor.mm)
+    target_link_libraries(lotus_native PRIVATE
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalPerformanceShadersGraph")
+    target_compile_definitions(lotus_native PRIVATE LOTUS_WITH_METAL=1)
+    set_source_files_properties(src/metal_executor.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+endif()
 target_compile_definitions(
     lotus_native PRIVATE
         LOTUS_NATIVE_BUILD

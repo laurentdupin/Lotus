@@ -4,10 +4,13 @@
 #include "prompt_cache.h"
 #include "unet_cpu.h"
 #include "vae_cpu.h"
+#include "inferbridge/native_harness_diffusion_shape.h"
+#if defined(LOTUS_WITH_METAL)
+#include "metal_executor.h"
+#endif
 #if defined(LOTUS_WITH_VULKAN)
 #include "gpu_model.h"
 #include "lotus_gpu.h"
-#include "inferbridge/native_harness_diffusion_shape.h"
 #include "operators.h"
 #include "vulkan.h"
 #endif
@@ -24,6 +27,9 @@
 struct lotus_context {
     std::unique_ptr<lotus_native::ModelBundle> model;
     lotus_native::TokenTensor prompt;
+#if defined(LOTUS_WITH_METAL)
+    std::unique_ptr<lotus_native::MetalExecutor> metal;
+#endif
 #if defined(LOTUS_WITH_VULKAN)
     std::unique_ptr<lotus_native::VulkanContext> vulkan;
     std::unique_ptr<lotus_native::GpuModel> gpu_unet;
@@ -281,7 +287,25 @@ int lotus_create_vulkan(
         return fail(LOTUS_INVALID_ARGUMENT, "invalid Lotus create argument");
     }
     *output = nullptr;
-#if !defined(LOTUS_WITH_VULKAN)
+#if defined(LOTUS_WITH_METAL)
+    (void)device_index;
+    try {
+        auto context = std::make_unique<lotus_context>();
+        context->model = std::make_unique<lotus_native::ModelBundle>(
+            snapshot_root, false);
+        const std::uint32_t input_channels = static_cast<std::uint32_t>(
+            context->model->unet().tensor("conv_in.weight").dimensions[1]);
+        context->prompt = lotus_native::load_empty_prompt_cache(
+            prompt_cache, input_channels);
+        context->metal = std::make_unique<lotus_native::MetalExecutor>(
+            *context->model, context->prompt);
+        *output = context.release();
+        last_error.clear();
+        return LOTUS_OK;
+    } catch (const std::exception& error) {
+        return fail(LOTUS_MODEL_ERROR, error);
+    }
+#elif !defined(LOTUS_WITH_VULKAN)
     (void)device_index;
     return fail(LOTUS_RUNTIME_ERROR, "this DLL was built without Vulkan");
 #else
@@ -329,6 +353,16 @@ int lotus_infer_rgb_f32_with_noise(
         return fail(LOTUS_INVALID_ARGUMENT, "invalid Lotus inference argument");
     }
     try {
+#if defined(LOTUS_WITH_METAL)
+        if (context->metal) {
+            output_depth(
+                context->metal->infer(
+                    rgb, width, height, initial_noise, posterior_noise),
+                width, height, depth);
+            last_error.clear();
+            return LOTUS_OK;
+        }
+#endif
 #if defined(LOTUS_WITH_VULKAN)
         if (context->vulkan) {
             lotus_native::VulkanBuffer output =

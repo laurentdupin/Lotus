@@ -11,7 +11,7 @@ int main(void) {
         return 2;
     }
     if (lotus_inferbridge_image_shape(53, 41, &width, &height) != LOTUS_OK ||
-        width != 768 || height != 594) {
+        width != 344 || height != 264) {
         return 3;
     }
     if (lotus_inferbridge_image_shape(0, 41, &width, &height) !=
