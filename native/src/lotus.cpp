@@ -60,13 +60,16 @@ private:
 };
 #endif
 
-std::shared_ptr<ExternalGpu> create_metal_external_gpu(lotus_context* context) {
+std::shared_ptr<ExternalGpu> create_metal_external_gpu(
+    lotus_context* context, const std::string& cache_path) {
 #if defined(LOTUS_WITH_METAL)
     if (!context || !context->metal)
         throw std::invalid_argument("Lotus Metal context is unavailable");
+    context->metal->set_cache_path(cache_path);
     return std::make_shared<MetalContextExternalGpu>(context);
 #else
     (void)context;
+    (void)cache_path;
     throw std::invalid_argument("Lotus was built without Metal");
 #endif
 }
