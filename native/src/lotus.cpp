@@ -5,6 +5,7 @@
 #include "unet_cpu.h"
 #include "vae_cpu.h"
 #include "inferbridge/native_harness_diffusion_shape.h"
+#include "lotus_internal.h"
 #if defined(LOTUS_WITH_METAL)
 #include "metal_executor.h"
 #endif
@@ -37,6 +38,39 @@ struct lotus_context {
     std::unique_ptr<lotus_native::VulkanOperators> operators;
 #endif
 };
+
+namespace lotus_native {
+#if defined(LOTUS_WITH_METAL)
+class MetalContextExternalGpu final : public ExternalGpu {
+public:
+    explicit MetalContextExternalGpu(lotus_context* context) : context_(context) {}
+    ExternalGpuCapabilities capabilities() const override { return {true, 0u, 3u}; }
+    std::shared_ptr<ExternalJob> submit_texture(
+        const ExternalTextureRequest& request) override {
+        if (!context_ || !context_->metal)
+            throw std::invalid_argument("Lotus Metal context is unavailable");
+        return context_->metal->submit_texture(request);
+    }
+    void transfer_counters(std::uint64_t& upload,
+                           std::uint64_t& download) const override {
+        upload = 0u; download = 0u;
+    }
+private:
+    lotus_context* context_ = nullptr;
+};
+#endif
+
+std::shared_ptr<ExternalGpu> create_metal_external_gpu(lotus_context* context) {
+#if defined(LOTUS_WITH_METAL)
+    if (!context || !context->metal)
+        throw std::invalid_argument("Lotus Metal context is unavailable");
+    return std::make_shared<MetalContextExternalGpu>(context);
+#else
+    (void)context;
+    throw std::invalid_argument("Lotus was built without Metal");
+#endif
+}
+}
 
 namespace {
 
