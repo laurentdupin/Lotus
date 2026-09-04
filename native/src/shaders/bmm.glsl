@@ -24,6 +24,7 @@ layout(push_constant) uniform Parameters {
     uint weight_qkv_kind;
     uint qkv_heads;
     uint qkv_tokens;
+    float input_scale;
 } parameters;
 
 shared float input_tile[64 * 16];
@@ -68,11 +69,13 @@ void main() {
                                 output_row) *
                                     parameters.qkv_embedding * 3 +
                             qkv_head * 64 + inner] * 0.125;
-                    input_tile[index] = scaled_query;
+                    input_tile[index] =
+                        scaled_query * parameters.input_scale;
                 } else {
                     input_tile[index] = input_buffer.data[
                         (batch * parameters.rows + output_row) *
-                            parameters.inner + inner];
+                            parameters.inner + inner] *
+                        parameters.input_scale;
                 }
             } else {
                 input_tile[index] = 0.0;

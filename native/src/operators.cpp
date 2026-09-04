@@ -60,6 +60,7 @@
 #include "normalize_depth_spv.h"
 #include "depth_to_image_spv.h"
 
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -70,6 +71,22 @@ namespace {
 std::uint32_t divide_up(std::uint32_t value, std::uint32_t divisor) {
     return (value + divisor - 1) / divisor;
 }
+
+struct BmmParameters {
+    std::uint32_t rows;
+    std::uint32_t columns;
+    std::uint32_t inner;
+    std::uint32_t batches;
+    std::uint32_t weight_transposed;
+    std::uint32_t output_token_major;
+    std::uint32_t qkv_embedding;
+    std::uint32_t input_qkv_query;
+    std::uint32_t weight_qkv_kind;
+    std::uint32_t qkv_heads;
+    std::uint32_t qkv_tokens;
+    float input_scale;
+};
+static_assert(sizeof(BmmParameters) == 48);
 
 void require_bytes(
     const VulkanBuffer& buffer,
@@ -152,7 +169,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       add_scaled_(context.create_pipeline(
           lotus_add_scaled_spv, lotus_add_scaled_spv_size, 4, 8)),
       bmm_(context.create_pipeline(
-          lotus_bmm_spv, lotus_bmm_spv_size, 3, 44)),
+          lotus_bmm_spv, lotus_bmm_spv_size, 3, 48)),
       bmm_score_half_(context.create_pipeline(
           lotus_bmm_score_half_spv,
           lotus_bmm_score_half_spv_size,
@@ -620,21 +637,9 @@ void VulkanOperators::attention_head64(
             heads);
         return;
     }
-    struct BmmParameters {
-        std::uint32_t rows;
-        std::uint32_t columns;
-        std::uint32_t inner;
-        std::uint32_t batches;
-        std::uint32_t weight_transposed;
-        std::uint32_t output_token_major;
-        std::uint32_t qkv_embedding;
-        std::uint32_t input_qkv_query;
-        std::uint32_t weight_qkv_kind;
-        std::uint32_t qkv_heads;
-        std::uint32_t qkv_tokens;
-    } score_parameters{
+    BmmParameters score_parameters{
         tokens, tokens, 64, batches * heads, 0, 0,
-        heads * 64, 1, 1, heads, tokens};
+        heads * 64, 1, 1, heads, tokens, 1.0f};
     context_.dispatch(
         bmm_,
         {&scores, &qkv, &qkv},
@@ -655,7 +660,7 @@ void VulkanOperators::attention_head64(
         softmax_parameters.rows);
     BmmParameters value_parameters{
         tokens, 64, tokens, batches * heads, 0, 1,
-        heads * 64, 0, 2, heads, tokens};
+        heads * 64, 0, 2, heads, tokens, 1.0f};
     context_.dispatch(
         bmm_,
         {&output, &scores, &qkv},
@@ -1314,6 +1319,32 @@ void VulkanOperators::attention_separate(
     require_bytes(output, std::uint64_t(queries) * dimensions, "attention");
     VulkanBuffer scores = context_.create_device_buffer(
         std::uint64_t(heads) * queries * keys * sizeof(float));
+    if (heads == 1) {
+        BmmParameters score_parameters{
+            queries, keys, head_dimensions, 1, 1, 0,
+            0, 0, 0, 0, 0,
+            1.0f / std::sqrt(static_cast<float>(head_dimensions))};
+        context_.dispatch(
+            bmm_, {&scores, &query, &key},
+            &score_parameters, sizeof(score_parameters),
+            divide_up(divide_up(keys, 4), 8),
+            divide_up(divide_up(queries, 8), 8));
+        struct SoftmaxParameters {
+            std::uint32_t rows, columns;
+        } softmax{queries, keys};
+        context_.dispatch(
+            softmax_lastdim_, {&scores, &scores},
+            &softmax, sizeof(softmax), softmax.rows);
+        BmmParameters value_parameters{
+            queries, head_dimensions, keys, 1, 0, 0,
+            0, 0, 0, 0, 0, 1.0f};
+        context_.dispatch(
+            bmm_, {&output, &scores, &value},
+            &value_parameters, sizeof(value_parameters),
+            divide_up(divide_up(head_dimensions, 4), 8),
+            divide_up(divide_up(queries, 8), 8));
+        return;
+    }
     struct Parameters {
         std::uint32_t queries, keys, heads, head_dimensions;
     } parameters{queries, keys, heads, head_dimensions};
