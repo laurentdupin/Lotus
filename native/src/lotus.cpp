@@ -548,3 +548,5 @@ int lotus_infer_bgra8_f32(
 }
 
 }  // extern "C"
+
+#include "linux_capture.inl"
