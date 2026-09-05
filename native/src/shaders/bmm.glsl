@@ -62,7 +62,12 @@ void main() {
             if (batch < parameters.batches &&
                 output_row < parameters.rows &&
                 inner < parameters.inner) {
-                if (parameters.input_qkv_query != 0) {
+                if (parameters.input_qkv_query == 2) {
+                    input_tile[index] = input_buffer.data[
+                        output_row * parameters.qkv_embedding +
+                        qkv_head * parameters.inner + inner] *
+                        parameters.input_scale;
+                } else if (parameters.input_qkv_query != 0) {
                     precise float scaled_query =
                         input_buffer.data[
                             (qkv_frame * parameters.qkv_tokens +
@@ -89,7 +94,19 @@ void main() {
             if (batch < parameters.batches &&
                 output_column < parameters.columns &&
                 inner < parameters.inner) {
-                if (parameters.weight_qkv_kind != 0) {
+                if (parameters.weight_qkv_kind == 3) {
+                    const uint token = parameters.weight_transposed != 0
+                        ? output_column
+                        : inner;
+                    const uint feature = parameters.weight_transposed != 0
+                        ? inner
+                        : output_column;
+                    const uint head_dimensions =
+                        parameters.qkv_embedding / parameters.qkv_heads;
+                    weight_tile[index] = weight_buffer.data[
+                        token * parameters.qkv_embedding +
+                        qkv_head * head_dimensions + feature];
+                } else if (parameters.weight_qkv_kind != 0) {
                     const uint token =
                         parameters.weight_qkv_kind == 1
                         ? output_column
@@ -152,7 +169,7 @@ void main() {
                         parameters.qkv_heads != 0
                     ? ((qkv_frame * parameters.qkv_tokens + output_row) *
                           parameters.qkv_embedding +
-                        qkv_head * 64 + output_column)
+                        qkv_head * parameters.columns + output_column)
                     : parameters.output_token_major != 0
                     ? (output_row * parameters.batches + batch) *
                         parameters.columns + output_column

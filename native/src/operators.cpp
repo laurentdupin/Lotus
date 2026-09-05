@@ -1345,23 +1345,29 @@ void VulkanOperators::attention_separate(
             divide_up(divide_up(queries, 8), 8));
         return;
     }
-    struct Parameters {
-        std::uint32_t queries, keys, heads, head_dimensions;
-    } parameters{queries, keys, heads, head_dimensions};
+    BmmParameters score_parameters{
+        queries, keys, head_dimensions, heads, 1, 0,
+        dimensions, 2, 3, heads, queries,
+        1.0f / std::sqrt(static_cast<float>(head_dimensions))};
     context_.dispatch(
-        attention_scores_, {&scores, &query, &key},
-        &parameters, sizeof(parameters), divide_up(keys, 64),
-        queries * heads);
+        bmm_, {&scores, &query, &key},
+        &score_parameters, sizeof(score_parameters),
+        divide_up(divide_up(keys, 4), 8),
+        divide_up(divide_up(queries, 8), 8), heads);
     struct SoftmaxParameters {
         std::uint32_t rows, columns;
     } softmax{heads * queries, keys};
     context_.dispatch(
         softmax_lastdim_, {&scores, &scores},
         &softmax, sizeof(softmax), softmax.rows);
+    BmmParameters value_parameters{
+        queries, head_dimensions, keys, heads, 0, 1,
+        dimensions, 0, 3, heads, queries, 1.0f};
     context_.dispatch(
-        attention_values_, {&output, &scores, &value},
-        &parameters, sizeof(parameters),
-        divide_up(head_dimensions, 64), queries * heads);
+        bmm_, {&output, &scores, &value},
+        &value_parameters, sizeof(value_parameters),
+        divide_up(divide_up(head_dimensions, 4), 8),
+        divide_up(divide_up(queries, 8), 8), heads);
 }
 
 void VulkanOperators::preprocess_rgb(
