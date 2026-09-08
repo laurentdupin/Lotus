@@ -227,7 +227,7 @@ public:
 
 private:
     GpuTokens linear(
-        GpuModel& model, GpuTokens&& input,
+        GpuModel& model, const GpuTokens& input,
         const std::string& weight_name,
         const std::string& bias_name = {}) {
         const GpuTensor& kernel = tensor(model, weight_name);
@@ -463,28 +463,16 @@ private:
         GpuModel& model, const GpuTokens& query_input,
         const GpuTokens& key_value_input, const std::string& prefix,
         std::uint32_t heads) {
-        auto clone_tokens = [&](const GpuTokens& source) {
-            GpuTokens result{
-                context_.create_device_buffer(
-                    std::uint64_t(source.tokens) * source.dimensions *
-                    sizeof(float)),
-                source.tokens, source.dimensions};
-            context_.copy(
-                result.buffer, 0, source.buffer, 0,
-                std::uint64_t(source.tokens) * source.dimensions *
-                sizeof(float));
-            return result;
-        };
         GpuTokens q = linear(
-            model, clone_tokens(query_input), prefix + ".to_q.weight",
+            model, query_input, prefix + ".to_q.weight",
             tensor_exists(model, prefix + ".to_q.bias")
                 ? prefix + ".to_q.bias" : std::string{});
         GpuTokens k = linear(
-            model, clone_tokens(key_value_input), prefix + ".to_k.weight",
+            model, key_value_input, prefix + ".to_k.weight",
             tensor_exists(model, prefix + ".to_k.bias")
                 ? prefix + ".to_k.bias" : std::string{});
         GpuTokens v = linear(
-            model, clone_tokens(key_value_input), prefix + ".to_v.weight",
+            model, key_value_input, prefix + ".to_v.weight",
             tensor_exists(model, prefix + ".to_v.bias")
                 ? prefix + ".to_v.bias" : std::string{});
         GpuTokens attended{
