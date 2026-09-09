@@ -1,3 +1,4 @@
+#include <inferbridge/linux_model_execution_policy.h>
 #include "operators.h"
 
 #include "add_scaled_spv.h"
@@ -947,7 +948,8 @@ void VulkanOperators::conv2d(
         !half_weight && !block8 && kernel == 3 && stride == 1 &&
         padding == 1 && input_width == output_width &&
         input_height == output_height &&
-        context_.subgroup_size() == 32;
+        inferbridge::native_harness::linux_tiled_convolution_supported(
+            context_.subgroup_size(), half_weight);
     context_.dispatch(
         tiled
             ? conv2d_tiled_
@@ -1000,10 +1002,12 @@ void VulkanOperators::conv2d_asymmetric(
         !winograd && kernel == 3 && stride == 1 && pad_before == 1 &&
         pad_after == 1 && input_width == output_width &&
         input_height == output_height &&
-        context_.subgroup_size() == 32;
+        inferbridge::native_harness::linux_tiled_convolution_supported(
+            context_.subgroup_size(), half_weight);
     const bool stride2_tiled =
         kernel == 3 && stride == 2 &&
-        context_.subgroup_size() == 32;
+        inferbridge::native_harness::linux_tiled_convolution_supported(
+            context_.subgroup_size(), half_weight);
     const bool pointwise =
         !winograd && kernel == 1 && stride == 1 &&
         pad_before == 0 && pad_after == 0 &&
