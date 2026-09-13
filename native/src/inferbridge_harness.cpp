@@ -1,3 +1,4 @@
+#include <inferbridge/native_harness_json.h>
 #include "inferbridge_harness.h"
 
 #include "lotus_native.h"
@@ -113,17 +114,7 @@ bool valid_string(ibrh_string_view value) {
 
 bool json_string(
     const std::string& json, const std::string& key, std::string& value) {
-    const std::string marker = "\"" + key + "\"";
-    size_t position = json.find(marker);
-    if (position == std::string::npos) return false;
-    position = json.find(':', position + marker.size());
-    if (position == std::string::npos) return false;
-    position = json.find_first_not_of(" \t\r\n", position + 1u);
-    if (position == std::string::npos || json[position] != '"') return false;
-    const size_t end = json.find('"', position + 1u);
-    if (end == std::string::npos) return false;
-    value = json.substr(position + 1u, end - position - 1u);
-    return true;
+    return inferbridge::harness_json::string_member(json, key, value);
 }
 
 bool json_uint64(
@@ -590,8 +581,8 @@ ibrh_result IBRH_CALL model_plan_outputs(
     const ibrh_result result = model_get_port(
         model, IBRH_PORT_OUTPUT, 0u, sizeof(outputs[0]), &outputs[0]);
     if (result != IBRH_OK) return result;
-    outputs[0].width = request->inputs[0].width;
-    outputs[0].height = request->inputs[0].height;
+    if(lotus_inferbridge_image_shape(request->inputs[0].width,request->inputs[0].height,
+        &outputs[0].width,&outputs[0].height)!=LOTUS_OK)return IBRH_ERROR_INVALID_ARGUMENT;
     outputs[0].flags = 0u;
     return IBRH_OK;
 }
@@ -619,8 +610,8 @@ ibrh_result IBRH_CALL submit(
         return IBRH_ERROR_STRUCT_TOO_SMALL;
     const ibrh_resource& input = input_binding.resource;
     const ibrh_resource& destination = output_binding.resource;
-    const uint32_t planned_width = input.width;
-    const uint32_t planned_height = input.height;
+    uint32_t planned_width=0,planned_height=0;
+    if(lotus_inferbridge_image_shape(input.width,input.height,&planned_width,&planned_height)!=LOTUS_OK)return IBRH_ERROR_INVALID_ARGUMENT;
     if (destination.width != planned_width || destination.height != planned_height ||
         destination.kind != IBRH_RESOURCE_KIND_IMAGE_2D ||
         destination.pixel_format != IBRH_PIXEL_DEPTH_FLOAT32)

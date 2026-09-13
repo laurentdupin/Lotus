@@ -183,8 +183,8 @@ public:
             std::uint32_t processing_height = 0u;
             inferbridge_shape(request.width, request.height,
                               processing_width, processing_height);
-            if (request.output_width != request.width ||
-                request.output_height != request.height)
+            if (!request.output_width ||
+                !request.output_height)
                 throw std::invalid_argument("Lotus output dimensions do not match its plan");
             const VkFormat input_format = request.rgba ?
                 VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
@@ -265,7 +265,7 @@ public:
                 depth = graph_.infer_device(
                     std::move(rgb), processing_width, processing_height,
                     std::move(initial), std::move(posterior),
-                    request.width, request.height);
+                    request.output_width, request.output_height);
             } catch (const std::exception& error) {
                 throw std::runtime_error(
                     std::string("Lotus bounded diffusion/VAE stage failed: ") +
@@ -279,7 +279,7 @@ public:
                         output, VK_IMAGE_LAYOUT_GENERAL,
                         VK_ACCESS_SHADER_WRITE_BIT);
                     operators_.depth_to_image(
-                        output, depth, request.width, request.height);
+                        output, depth, request.output_width, request.output_height);
                     context_.release_external_image(
                         output, VK_IMAGE_LAYOUT_GENERAL,
                         VK_ACCESS_SHADER_WRITE_BIT);

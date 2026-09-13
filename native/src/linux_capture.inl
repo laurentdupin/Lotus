@@ -38,7 +38,7 @@ void lotus_infer_linux_capture(
                          std::move(second), width, height);
   std::vector<float> depth(uint64_t(width) * height);
   vk.download(result, depth.data(), depth.size() * sizeof(float));
-  resize_and_normalize(depth.data(), width, height, source.width, source.height,
+  resize_and_normalize(depth.data(), width, height, width, height,
                        output);
 }
 #endif

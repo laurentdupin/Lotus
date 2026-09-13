@@ -506,7 +506,7 @@ int lotus_infer_bgra8_f32_with_noise(
         }
         resize_and_normalize(
             processing_depth.data(), processing_width, processing_height,
-            width, height, depth);
+            processing_width, processing_height, depth);
         last_error.clear();
         return LOTUS_OK;
     } catch (const std::exception& error) {
