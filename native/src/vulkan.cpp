@@ -422,11 +422,7 @@ VulkanContext::VulkanContext(
     std::vector<VkQueueFamilyProperties> families(family_count);
     vkGetPhysicalDeviceQueueFamilyProperties(
         physical_device_, &family_count, families.data());
-    auto family = std::find_if(
-        families.begin(), families.end(), [](const auto& candidate) {
-            return candidate.queueCount > 0 &&
-                (candidate.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
-        });
+    auto family = inferbridge::native_harness::select_inference_queue_family(families, false);
     if (family == families.end()) {
         throw std::runtime_error("Vulkan device has no compute queue");
     }
